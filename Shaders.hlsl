@@ -20,7 +20,10 @@ cbuffer PerObjectCB : register(b0)
     float  gUVTileY;
 
     int    gUseTexture;
-    float3 pad2;
+    float3 object_center;
+
+    float time;
+    float3 pad;
 };
 
 Texture2D    gDiffuseMap : register(t0);
@@ -47,8 +50,13 @@ VertexOut VSMain(VertexIn vin)
 {
     VertexOut vout;
 
-    vout.PosH   = mul(float4(vin.PosL, 1.0f), gWorldViewProj);
-    vout.PosW   = mul(float4(vin.PosL, 1.0f), gWorld).xyz;
+    float3 animatedPos = vin.PosL;
+    float3 offsetFromCenter = vin.PosL - object_center;
+    float scaleY = 1.0f + 0.5f * sin(time * 2.0f);
+    animatedPos.y = object_center.y + offsetFromCenter.y * scaleY;
+
+    vout.PosH   = mul(float4(animatedPos, 1.0f), gWorldViewProj);
+    vout.PosW   = mul(float4(animatedPos, 1.0f), gWorld).xyz;
     vout.NormalW = normalize(mul(vin.NormalL, (float3x3)gWorld));
 
     float2 uv;
