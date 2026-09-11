@@ -1,2 +1,0 @@
-# CG_Second
-

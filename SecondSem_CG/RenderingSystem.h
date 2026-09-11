@@ -4,6 +4,7 @@
 // оркеструет G-buffer (геопроход) и полноэкранный проход света по нескольким источникам.
 
 #include <cstdint>
+#include <vector>
 
 #include <d3d12.h>
 #include <DirectXMath.h>
@@ -14,6 +15,12 @@
 class RenderingSystem
 {
 public:
+    struct RainLight
+    {
+        DirectX::XMFLOAT3 position{};
+        float fallSpeed = 0.0f;
+    };
+
     void Init(
         ID3D12Device* device,
         UINT width,
@@ -34,7 +41,8 @@ public:
         const DirectX::XMFLOAT3& cameraPos,
         const DirectX::XMFLOAT3& cameraForward,
         UINT screenW,
-        UINT screenH);
+        UINT screenH,
+        float deltaTime);
 
     void DrawLightingPass(
         ID3D12GraphicsCommandList* cmd,
@@ -44,10 +52,12 @@ public:
         UINT screenH);
 
     GBuffer& GBufferTargets() { return m_gbuffer; }
+    const std::vector<RainLight>& RainLights() const { return m_rainLights; }
 
 private:
     void CreateLightingPipeline(ID3D12Device* device, const wchar_t* hlslPath);
     void WriteDefaultLights();
+    void UpdateLightRain(float deltaTime);
 
     GBuffer m_gbuffer;
 
@@ -58,4 +68,7 @@ private:
 
     UINT m_gbufferSrvBase = 0;
     UINT m_srvDescriptorIncrement = 0;
+    std::vector<RainLight> m_rainLights;
+    float m_rainSpawnRemainder = 0.0f;
+    uint32_t m_randomState = 0xC0FFEEu;
 };

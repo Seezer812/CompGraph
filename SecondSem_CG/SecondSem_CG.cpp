@@ -64,7 +64,11 @@ struct alignas(256) MatCBGPU
     float Ns;
     UINT UseUvAnim;
     UINT HasSpecularTex;
-    float _PadMat[50];
+    UINT IsEmissive;
+    UINT HasNormalMap;
+    UINT HasDisplacementMap;
+    UINT EnableTessellation;
+    float _PadMat[46];
 };
 
 static_assert(sizeof(MatCBGPU) == 256);
@@ -97,6 +101,8 @@ bool g_swapSeenPresent[kFrameCount]{};
 
 ComPtr<ID3D12RootSignature> g_rootSignature;
 ComPtr<ID3D12PipelineState> g_pipelineGeo;
+ComPtr<ID3D12PipelineState> g_pipelineGeoWire;
+ComPtr<ID3D12PipelineState> g_pipelineGeoSimple;
 
 RenderingSystem g_renderSys;
 
@@ -113,12 +119,21 @@ D3D12_INDEX_BUFFER_VIEW g_meshIbv{};
 std::vector<uint32_t> g_matSrvPairBase;
 std::vector<ComPtr<ID3D12Resource>> g_gpuTextures;
 ComPtr<ID3D12Resource> g_whiteTexture;
+ComPtr<ID3D12Resource> g_flatNormalTexture;
 ComPtr<ID3D12Resource> g_matCBUpload;
 UINT8* g_matCBMapped = nullptr;
 UINT g_matCount = 0;
 
 ComPtr<ID3D12Resource> g_frameCBUpload;
 UINT8* g_frameCBMapped = nullptr;
+
+ComPtr<ID3D12Resource> g_rainSphereVB;
+ComPtr<ID3D12Resource> g_rainSphereIB;
+D3D12_VERTEX_BUFFER_VIEW g_rainSphereVbv{};
+D3D12_INDEX_BUFFER_VIEW g_rainSphereIbv{};
+ComPtr<ID3D12Resource> g_rainSphereFrameCB;
+UINT8* g_rainSphereFrameCBMapped = nullptr;
+ComPtr<ID3D12Resource> g_rainSphereMatCB;
 
 UINT g_frameIndex = 0;
 float g_appTime = 0.0f;
@@ -127,6 +142,8 @@ XMFLOAT3 g_camPos{0.0f, 1.4f, 4.5f};
 float g_camYaw = 0.0f;
 float g_camPitch = -0.12f;
 bool g_camPrevRmb = false;
+bool g_tessellationEnabled = true;
+bool g_wireframeEnabled = false;
 
 LARGE_INTEGER g_qpcFreq{};
 LARGE_INTEGER g_qpcLast{};
@@ -302,6 +319,49 @@ void CreateFrameCB()
     ThrowIfFailed(g_frameCBUpload->Map(0, &rr, reinterpret_cast<void**>(&g_frameCBMapped)));
 }
 
+void UpdateWindowTitle()
+{
+    if (!g_hwnd)
+        return;
+    wchar_t title[192]{};
+    swprintf_s(
+        title,
+        L"SecondSem CG — Sponza | T: tessellation %s | R: edges %s",
+        g_tessellationEnabled ? L"ON" : L"OFF",
+        g_wireframeEnabled ? L"ON" : L"OFF");
+    SetWindowTextW(g_hwnd, title);
+}
+
+void CreateRainSphereResources()
+{
+    // Октаэдр: достаточно гладкий силуэт для маленького светящегося шарика,
+    // но всего 8 треугольников на каплю.
+    const Obj::MeshVertex vertices[] = {
+        {0, 1, 0, 0, 1, 0, 0, 0}, {1, 0, 0, 1, 0, 0, 0, 0},
+        {0, 0, 1, 0, 0, 1, 0, 0}, {-1, 0, 0, -1, 0, 0, 0, 0},
+        {0, 0, -1, 0, 0, -1, 0, 0}, {0, -1, 0, 0, -1, 0, 0, 0},
+    };
+    const uint32_t indices[] = {0,1,2, 0,2,3, 0,3,4, 0,4,1, 5,2,1, 5,3,2, 5,4,3, 5,1,4};
+    g_rainSphereVB = CreateUploadBuffer(vertices, sizeof(vertices));
+    g_rainSphereIB = CreateUploadBuffer(indices, sizeof(indices));
+    g_rainSphereVbv = {g_rainSphereVB->GetGPUVirtualAddress(), sizeof(vertices), sizeof(Obj::MeshVertex)};
+    g_rainSphereIbv = {g_rainSphereIB->GetGPUVirtualAddress(), sizeof(indices), DXGI_FORMAT_R32_UINT};
+
+    g_rainSphereFrameCB = CreateUploadBuffer(nullptr, 125ull * kCbAlign);
+    D3D12_RANGE rr{0, 0};
+    ThrowIfFailed(g_rainSphereFrameCB->Map(0, &rr, reinterpret_cast<void**>(&g_rainSphereFrameCBMapped)));
+
+    g_rainSphereMatCB = CreateUploadBuffer(nullptr, kCbAlign);
+    MatCBGPU sphereMat{};
+    sphereMat.Kd = XMFLOAT4(0.25f, 0.65f, 1.0f, 1.0f);
+    sphereMat.UvScale = XMFLOAT2(1.0f, 1.0f);
+    sphereMat.IsEmissive = 1;
+    void* mapped = nullptr;
+    ThrowIfFailed(g_rainSphereMatCB->Map(0, &rr, &mapped));
+    std::memcpy(mapped, &sphereMat, sizeof(sphereMat));
+    g_rainSphereMatCB->Unmap(0, nullptr);
+}
+
 void CreateSrvHeap()
 {
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -316,7 +376,7 @@ void CreateGeometryPipeline()
 {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 2;
+    range.NumDescriptors = 4;
     range.BaseShaderRegister = 0;
     range.RegisterSpace = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
@@ -333,7 +393,7 @@ void CreateGeometryPipeline()
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[2].DescriptorTable.NumDescriptorRanges = 1;
     params[2].DescriptorTable.pDescriptorRanges = &range;
-    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_STATIC_SAMPLER_DESC samp{};
     samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -343,7 +403,7 @@ void CreateGeometryPipeline()
     samp.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
     samp.MaxLOD = D3D12_FLOAT32_MAX;
     samp.ShaderRegister = 0;
-    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rs{};
     rs.NumParameters = 3;
@@ -358,8 +418,10 @@ void CreateGeometryPipeline()
         0, sigBlob->GetBufferPointer(), sigBlob->GetBufferSize(), IID_PPV_ARGS(&g_rootSignature)));
 
     const std::wstring sp = DeferredShaderPath();
-    ComPtr<ID3DBlob> vs, ps;
+    ComPtr<ID3DBlob> vs, hs, ds, ps;
     CompileShader(sp.c_str(), "GeometryVS", "vs_5_0", vs);
+    CompileShader(sp.c_str(), "TessellationHS", "hs_5_0", hs);
+    CompileShader(sp.c_str(), "TessellationDS", "ds_5_0", ds);
     CompileShader(sp.c_str(), "GeometryPS", "ps_5_0", ps);
 
     const D3D12_INPUT_ELEMENT_DESC layout[] = {
@@ -371,6 +433,8 @@ void CreateGeometryPipeline()
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
     pso.pRootSignature = g_rootSignature.Get();
     pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pso.HS = {hs->GetBufferPointer(), hs->GetBufferSize()};
+    pso.DS = {ds->GetBufferPointer(), ds->GetBufferSize()};
     pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
     for (UINT rt = 0; rt < 3; ++rt)
         pso.BlendState.RenderTarget[rt].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
@@ -381,7 +445,7 @@ void CreateGeometryPipeline()
     pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
     pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     pso.SampleMask = UINT_MAX;
-    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
     pso.NumRenderTargets = 3;
     pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -390,6 +454,16 @@ void CreateGeometryPipeline()
     pso.SampleDesc.Count = 1;
     pso.InputLayout = {layout, _countof(layout)};
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeo)));
+
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoWire)));
+
+    // Шарики дождя остаются обычными треугольниками и не проходят через тесселяцию.
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.HS = {};
+    pso.DS = {};
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoSimple)));
 }
 
 std::filesystem::path FindSponzaObj()
@@ -471,6 +545,7 @@ bool LoadScene()
     g_matSrvPairBase.clear();
     g_gpuTextures.clear();
     g_whiteTexture.Reset();
+    g_flatNormalTexture.Reset();
     g_meshVB.Reset();
     g_meshIB.Reset();
     g_matCBUpload.Reset();
@@ -517,6 +592,8 @@ bool LoadScene()
     const std::filesystem::path mtlDir = objPath.parent_path();
     g_matSrvPairBase.assign(g_mesh.materials.size(), 0);
     std::vector<uint8_t> matHasSpecularTex(g_mesh.materials.size(), 0);
+    std::vector<uint8_t> matHasNormalMap(g_mesh.materials.size(), 0);
+    std::vector<uint8_t> matHasDisplacementMap(g_mesh.materials.size(), 0);
 
     ThrowIfFailed(g_cmdAlloc[0]->Reset());
     ThrowIfFailed(g_cmdList->Reset(g_cmdAlloc[0].Get(), nullptr));
@@ -537,6 +614,15 @@ bool LoadScene()
     Tex::WriteTexture2DSrv(
         g_device.Get(), whiteTex.Get(), g_srvHeap.Get(), nextSlot + 1, g_srvDescriptorSize);
     nextSlot += 2;
+
+    ComPtr<ID3D12Resource> flatNormal;
+    if (!Tex::CreateSolidTexture2D(
+            g_device.Get(), g_cmdList.Get(), g_srvHeap.Get(), nextSlot, g_srvDescriptorSize, 0xFFFF8080u,
+            flatNormal, uploadKeep))
+        return false;
+    g_flatNormalTexture = flatNormal;
+    g_gpuTextures.push_back(flatNormal);
+    nextSlot += 1;
 
     std::unordered_map<std::wstring, ComPtr<ID3D12Resource>> texCache;
 
@@ -574,14 +660,14 @@ bool LoadScene()
 
     for (size_t i = 0; i < g_mesh.materials.size(); ++i)
     {
-        if (nextSlot + 2u > kSrvHeapCount)
+        if (nextSlot + 4u > kSrvHeapCount)
         {
             MessageBoxW(g_hwnd, L"Переполнение кучи SRV.", L"Текстуры", MB_OK | MB_ICONWARNING);
             break;
         }
 
         const uint32_t pairBase = nextSlot;
-        nextSlot += 2;
+        nextSlot += 4;
         g_matSrvPairBase[i] = pairBase;
 
         const Obj::Material& m = g_mesh.materials[i];
@@ -601,6 +687,22 @@ bool LoadScene()
                 bindTextureSlot(pairBase + 1, Tex::ResolveTexturePathInTexturesFolder(mtlDir, m.specularMapRel));
 
         matHasSpecularTex[i] = specLoaded ? 1 : 0;
+
+        const std::filesystem::path diffusePath = Tex::ResolveTexturePathInTexturesFolder(mtlDir, m.diffuseMapRel);
+        std::wstring textureStem = diffusePath.stem().wstring();
+        if (textureStem.ends_with(L"_diff"))
+            textureStem.resize(textureStem.size() - 5);
+        else if (textureStem.ends_with(L"_dif"))
+            textureStem.resize(textureStem.size() - 4);
+        const std::filesystem::path normalPath = diffusePath.parent_path() / (textureStem + L"_ddn.tga");
+        const std::filesystem::path displacementPath = diffusePath.parent_path() /
+            (diffusePath.stem().wstring() + L"_displacement.tga");
+        const bool normalLoaded = bindTextureSlot(pairBase + 2, normalPath);
+        if (!normalLoaded)
+            Tex::WriteTexture2DSrv(g_device.Get(), g_flatNormalTexture.Get(), g_srvHeap.Get(), pairBase + 2, g_srvDescriptorSize);
+        const bool displacementLoaded = bindTextureSlot(pairBase + 3, displacementPath);
+        matHasNormalMap[i] = normalLoaded ? 1 : 0;
+        matHasDisplacementMap[i] = displacementLoaded ? 1 : 0;
     }
 
     ExecuteCommandList();
@@ -633,6 +735,16 @@ bool LoadScene()
             slot->Ns = mm.Ns;
             slot->UseUvAnim = MaterialPathSuggestUvAnim(mm.diffuseMapRel) ? 1u : 0u;
             slot->HasSpecularTex = matHasSpecularTex[i];
+            slot->HasNormalMap = matHasNormalMap[i];
+            slot->HasDisplacementMap = matHasDisplacementMap[i];
+            // Тесселируем массивные поверхности с height map. Тонкие объекты
+            // (ткань, цепи, вазы) остаются исходной геометрией.
+            const bool tessellateMaterial =
+                mm.name == "floor" || mm.name == "bricks" || mm.name == "arch" ||
+                mm.name == "ceiling" || mm.name == "column_a" || mm.name == "column_b" ||
+                mm.name == "column_c" || mm.name == "details" || mm.name == "roof" ||
+                mm.name == "thorn";
+            slot->EnableTessellation = (matHasDisplacementMap[i] && tessellateMaterial) ? 1u : 0u;
         }
         else
         {
@@ -656,6 +768,7 @@ void WriteFrameCB(const XMMATRIX& world, const XMMATRIX& viewProj, float timeSec
     data.TimeCamPos =
         XMFLOAT4(timeSec, g_camPos.x, g_camPos.y, g_camPos.z);
     data.UvAnimAndPad = XMFLOAT4(0.035f, 0.022f, 0.0f, 0.0f);
+    data.UvAnimAndPad.z = g_tessellationEnabled ? 1.0f : 0.0f;
     std::memcpy(g_frameCBMapped, &data, sizeof(FrameCB));
 }
 
@@ -752,14 +865,14 @@ void DrawScene(const XMMATRIX& viewProj)
     ID3D12DescriptorHeap* heaps[] = {g_srvHeap.Get()};
     g_cmdList->SetDescriptorHeaps(1, heaps);
     g_cmdList->SetGraphicsRootSignature(g_rootSignature.Get());
-    g_cmdList->SetPipelineState(g_pipelineGeo.Get());
+    g_cmdList->SetPipelineState(g_wireframeEnabled ? g_pipelineGeoWire.Get() : g_pipelineGeo.Get());
 
     const XMMATRIX world =
         XMMatrixScaling(0.01f, 0.01f, 0.01f) * XMMatrixRotationX(XM_PI);
     WriteFrameCB(world, viewProj, g_appTime);
     g_cmdList->SetGraphicsRootConstantBufferView(0, g_frameCBUpload->GetGPUVirtualAddress());
 
-    g_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
     g_cmdList->IASetVertexBuffers(0, 1, &g_meshVbv);
     g_cmdList->IASetIndexBuffer(&g_meshIbv);
 
@@ -777,6 +890,42 @@ void DrawScene(const XMMATRIX& viewProj)
         table.ptr += static_cast<SIZE_T>(pairBase) * g_srvDescriptorSize;
         g_cmdList->SetGraphicsRootDescriptorTable(2, table);
         g_cmdList->DrawIndexedInstanced(sm.indexCount, 1, sm.indexStart, 0, 0);
+    }
+}
+
+void DrawRainLightSpheres(const XMMATRIX& viewProj)
+{
+    const auto& drops = g_renderSys.RainLights();
+    if (drops.empty())
+        return;
+
+    ID3D12DescriptorHeap* heaps[] = {g_srvHeap.Get()};
+    g_cmdList->SetDescriptorHeaps(1, heaps);
+    g_cmdList->SetGraphicsRootSignature(g_rootSignature.Get());
+    g_cmdList->SetPipelineState(g_pipelineGeoSimple.Get());
+    g_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_cmdList->IASetVertexBuffers(0, 1, &g_rainSphereVbv);
+    g_cmdList->IASetIndexBuffer(&g_rainSphereIbv);
+    g_cmdList->SetGraphicsRootConstantBufferView(1, g_rainSphereMatCB->GetGPUVirtualAddress());
+    g_cmdList->SetGraphicsRootDescriptorTable(2, g_srvHeap->GetGPUDescriptorHandleForHeapStart());
+
+    constexpr float kSphereRadius = 0.045f;
+    constexpr float kHoverAboveLight = 0.075f;
+    for (UINT i = 0; i < drops.size() && i < 125; ++i)
+    {
+        FrameCB cb{};
+        const XMMATRIX world = XMMatrixScaling(kSphereRadius, kSphereRadius, kSphereRadius) *
+            XMMatrixTranslation(
+                drops[i].position.x,
+                drops[i].position.y - kHoverAboveLight,
+                drops[i].position.z);
+        XMStoreFloat4x4(&cb.World, world);
+        XMStoreFloat4x4(&cb.ViewProj, viewProj);
+        cb.TimeCamPos = XMFLOAT4(g_appTime, g_camPos.x, g_camPos.y, g_camPos.z);
+        std::memcpy(g_rainSphereFrameCBMapped + static_cast<size_t>(i) * kCbAlign, &cb, sizeof(cb));
+        g_cmdList->SetGraphicsRootConstantBufferView(
+            0, g_rainSphereFrameCB->GetGPUVirtualAddress() + static_cast<UINT64>(i) * kCbAlign);
+        g_cmdList->DrawIndexedInstanced(24, 1, 0, 0, 0);
     }
 }
 
@@ -813,6 +962,7 @@ void DrawFrame(float dt)
     g_cmdList->RSSetScissorRects(1, &scissor);
 
     DrawScene(viewProj);
+    DrawRainLightSpheres(viewProj);
 
     gb.TransitionToShaderResource(g_cmdList.Get());
 
@@ -827,7 +977,7 @@ void DrawFrame(float dt)
 
     XMFLOAT3 camForward{};
     XMStoreFloat3(&camForward, CameraForwardVector());
-    g_renderSys.UploadFrameConstants(g_camPos, camForward, g_width, g_height);
+    g_renderSys.UploadFrameConstants(g_camPos, camForward, g_width, g_height, dt);
     g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
 
     D3D12_RESOURCE_BARRIER toPresent =
@@ -917,6 +1067,7 @@ void InitD3D(HWND hwnd)
         ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
 
     CreateFrameCB();
+    CreateRainSphereResources();
     CreateSrvHeap();
     CreateGeometryPipeline();
     g_renderSys.Init(
@@ -947,6 +1098,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE)
             g_running = false;
+        else if (wp == 'T' && (lp & (1ll << 30)) == 0)
+        {
+            g_tessellationEnabled = !g_tessellationEnabled;
+            UpdateWindowTitle();
+        }
+        else if (wp == 'R' && (lp & (1ll << 30)) == 0)
+        {
+            g_wireframeEnabled = !g_wireframeEnabled;
+            UpdateWindowTitle();
+        }
         return 0;
     case WM_SIZE:
         if (g_swapChain && wp != SIZE_MINIMIZED)
@@ -981,13 +1142,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
 
     g_hwnd = CreateWindowExW(
-        0, wc.lpszClassName, L"SecondSem CG — Sponza: текстуры, MTL, тайлинг, UV-анимация", WS_OVERLAPPEDWINDOW,
+        0, wc.lpszClassName, L"SecondSem CG", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, windowRect.right - windowRect.left, windowRect.bottom - windowRect.top,
         nullptr, nullptr, wc.hInstance, nullptr);
     if (!g_hwnd)
         return static_cast<int>(HRESULT_FROM_WIN32(GetLastError()));
 
     InitD3D(g_hwnd);
+    UpdateWindowTitle();
     ShowWindow(g_hwnd, SW_SHOW);
     UpdateWindow(g_hwnd);
 
