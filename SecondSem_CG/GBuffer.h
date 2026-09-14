@@ -1,7 +1,7 @@
 #pragma once
 
 // G-buffer (Geometry buffer) — набор вспомогательных рендер-таргетов для отложенного освещения:
-// в геопроходе сюда пишутся альбедо, нормали и позиция в мире; в проходе света только читаются.
+// в геопроходе сюда пишутся альбедо, нормали и глубина; позиция мира восстанавливается в lighting pass.
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -40,7 +40,7 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_albedo;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_normal;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_position;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_depthBuffer;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_depth;
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;

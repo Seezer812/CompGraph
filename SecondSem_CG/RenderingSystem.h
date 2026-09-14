@@ -40,6 +40,7 @@ public:
     void UploadFrameConstants(
         const DirectX::XMFLOAT3& cameraPos,
         const DirectX::XMFLOAT3& cameraForward,
+        const DirectX::XMMATRIX& viewProjection,
         UINT screenW,
         UINT screenH,
         float deltaTime);

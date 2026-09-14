@@ -74,7 +74,9 @@ TessFactors TessellationFactors(InputPatch<GeoVsOut, 3> patch)
     }
     float3 center = (patch[0].posW + patch[1].posW + patch[2].posW) / 3.0f;
     float distanceToCamera = length(center - TimeCamPos.yzw);
-    float level = lerp(6.0f, 1.0f, saturate(distanceToCamera / 20.0f));
+    // Ограничение в 5 сохраняет
+    // заметную адаптивную тесселяцию на близких поверхностях.
+    float level = lerp(5.0f, 1.0f, saturate(distanceToCamera / 14.0f));
     f.edges[0] = f.edges[1] = f.edges[2] = f.inside = level;
     return f;
 }
@@ -106,7 +108,7 @@ struct GeoRtOut
 {
     float4 albedo : SV_Target0;
     float4 normal : SV_Target1;
-    float4 position : SV_Target2;
+    float depth : SV_Target2;
 };
 
 GeoRtOut GeometryPS(GeoVsOut input)
@@ -131,7 +133,7 @@ GeoRtOut GeometryPS(GeoVsOut input)
         normalW = normalize(tangent * normalT.x + bitangent * normalT.y + normalW * normalT.z);
     }
     o.normal = float4(normalW, IsEmissive);
-    o.position = float4(input.posW, 1);
+    o.depth = input.clipPos.z / input.clipPos.w;
     return o;
 }
 
@@ -139,7 +141,7 @@ GeoRtOut GeometryPS(GeoVsOut input)
 
 Texture2D GAlbedo : register(t0);
 Texture2D GNormal : register(t1);
-Texture2D GPos : register(t2);
+Texture2D GDepth : register(t2);
 SamplerState GSamp : register(s0);
 
 #define LIGHT_DIR 0
@@ -161,6 +163,7 @@ cbuffer LightingCB : register(b0)
 {
     float4 CameraPos_pad;
     float4 InvScreen_pad;
+    row_major float4x4 InverseViewProjection;
     uint LightCount;
     uint3 padHdr;
     GpuLight Lights[MAX_LIGHTS];
@@ -179,6 +182,8 @@ FsOut LightingFullscreenVS(uint vid : SV_VertexID)
     FsOut o;
     float2 uv = float2((vid << 1) & 2, vid & 2);
     o.pos = float4(uv * float2(2.f, -2.f) + float2(-1.f, 1.f), 0.f, 1.f);
+    // Сохраняем ориентацию полноэкранного прохода, согласованную с текущей
+    // системой координат загруженной Sponza.
     o.uv = float2(uv.x, 1.f - uv.y);
     return o;
 }
@@ -230,12 +235,19 @@ float4 LightingPS(FsOut pin) : SV_Target0
     float3 alb = GAlbedo.Sample(GSamp, pin.uv).rgb;
     float4 packedNormal = GNormal.Sample(GSamp, pin.uv);
     float3 N = packedNormal.xyz;
-    float3 P = GPos.Sample(GSamp, pin.uv).xyz;
 
-    float3 color = alb * (0.035f + packedNormal.w * 2.5f);
+    // Шарики дождя отмечены emissive и должны быть заметны даже в тёмных участках сцены.
+    float3 color = alb * (0.035f + packedNormal.w * 1.0f);
 
     if (dot(N, N) < 1e-6f)
         return float4(color, 1.f);
+
+    const float depth = GDepth.Sample(GSamp, pin.uv).r;
+    // Глубина и координаты восстановления используют одни и те же UV.
+    const float2 screenUv = pin.uv;
+    const float4 clipPosition = float4(screenUv.x * 2.f - 1.f, 1.f - screenUv.y * 2.f, depth, 1.f);
+    float4 worldPosition = mul(clipPosition, InverseViewProjection);
+    float3 P = worldPosition.xyz / max(worldPosition.w, 1e-6f);
 
     N = normalize(N);
     float3 V = normalize(CameraPos_pad.xyz - P);

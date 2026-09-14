@@ -51,6 +51,7 @@ struct LightingCBGPU
 {
     XMFLOAT4 cameraPos_pad{};
     XMFLOAT4 invScreen_pad{};
+    XMFLOAT4X4 inverseViewProjection{};
     UINT lightCount = 0;
     UINT padHdr[3]{};
     LightGpu lights[kMaxLights]{};
@@ -59,7 +60,7 @@ struct LightingCBGPU
     UINT rainTileLightIndices[120][4]{};
 };
 
-static_assert(sizeof(LightingCBGPU) == 10288);
+static_assert(sizeof(LightingCBGPU) == 10352);
 
 void RSCompile(const wchar_t* path, const char* entry, const char* target, ComPtr<ID3DBlob>& out)
 {
@@ -289,6 +290,7 @@ void RenderingSystem::Resize(
 void RenderingSystem::UploadFrameConstants(
     const XMFLOAT3& cameraPos,
     const XMFLOAT3& cameraForward,
+    const XMMATRIX& viewProjection,
     UINT screenW,
     UINT screenH,
     float deltaTime)
@@ -300,8 +302,13 @@ void RenderingSystem::UploadFrameConstants(
     const float iw = screenW > 0 ? 1.f / static_cast<float>(screenW) : 1.f;
     const float ih = screenH > 0 ? 1.f / static_cast<float>(screenH) : 1.f;
     cb->invScreen_pad = XMFLOAT4(iw, ih, 0.f, 0.f);
+    XMStoreFloat4x4(&cb->inverseViewProjection, XMMatrixInverse(nullptr, viewProjection));
 
     cb->lightCount = kStaticLightCount + static_cast<UINT>(m_rainLights.size());
+    // Сетка описывает только текущий кадр: без очистки её счётчики накапливались
+    // и после нескольких кадров переставали принимать новые дождевые источники.
+    std::memset(cb->rainTileCounts, 0, sizeof(cb->rainTileCounts));
+    std::memset(cb->rainTileLightIndices, 0, sizeof(cb->rainTileLightIndices));
 
     const XMVECTOR axis = XMVector3Normalize(XMLoadFloat3(&cameraForward));
     const XMVECTOR eye = XMLoadFloat3(&cameraPos);
@@ -320,10 +327,11 @@ void RenderingSystem::UploadFrameConstants(
         const RainLight& drop = m_rainLights[i];
         LightGpu& light = cb->lights[kStaticLightCount + i];
         light.type = LIGHT_POINT;
-        light.position_range = XMFLOAT4(drop.position.x, drop.position.y, drop.position.z, 1.8f);
+        // Ограниченный радиус не даёт десяткам лежащих капель пересветить сцену.
+        light.position_range = XMFLOAT4(drop.position.x, drop.position.y, drop.position.z, 2.35f);
         // Небольшие различия оттенка делают отдельные "капли" различимыми.
         const float hue = static_cast<float>((i * 37u) % 100u) / 100.0f;
-        light.color_intensity = XMFLOAT4(0.25f + hue * 0.35f, 0.45f + hue * 0.35f, 1.0f, 12.0f);
+        light.color_intensity = XMFLOAT4(0.25f + hue * 0.35f, 0.45f + hue * 0.35f, 1.0f, 22.0f);
 
         // Экранный пиксель проверяет только источники из своей и соседних ячеек.
         // Поэтому 125 источников не превращаются в 125 вычислений на каждый пиксель.

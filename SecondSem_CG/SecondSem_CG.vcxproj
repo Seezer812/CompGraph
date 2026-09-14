@@ -157,10 +157,24 @@
     <ClCompile Include="TextureUtil.cpp" />
     <ClCompile Include="GBuffer.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
+    <ClCompile Include="Camera.cpp" />
+    <ClCompile Include="RainSphereRenderer.cpp" />
+    <ClCompile Include="D3DHelpers.cpp" />
+    <ClCompile Include="ScenePaths.cpp" />
+    <ClCompile Include="SceneRenderer.cpp" />
+    <ClCompile Include="AppPaths.cpp" />
+    <ClCompile Include="D3D12Context.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Shaders.hlsl" />
     <None Include="Deferred.hlsl" />
+    <ClInclude Include="Camera.h" />
+    <ClInclude Include="RainSphereRenderer.h" />
+    <ClInclude Include="D3DHelpers.h" />
+    <ClInclude Include="ScenePaths.h" />
+    <ClInclude Include="SceneRenderer.h" />
+    <ClInclude Include="AppPaths.h" />
+    <ClInclude Include="D3D12Context.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

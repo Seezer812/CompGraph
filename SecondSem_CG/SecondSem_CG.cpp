@@ -13,18 +13,21 @@
 
 #include <wrl/client.h>
 
-#include "ObjLoader.h"
+#include "Camera.h"
+#include "AppPaths.h"
+#include "D3D12Context.h"
+#include "RainSphereRenderer.h"
+#include "D3DHelpers.h"
+#include "ScenePaths.h"
+#include "SceneRenderer.h"
 #include "RenderingSystem.h"
-#include "TextureUtil.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <cwctype>
 #include <filesystem>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #pragma comment(lib, "d3d12.lib")
@@ -42,98 +45,42 @@ constexpr UINT kClientW = 1280;
 constexpr UINT kClientH = 720;
 constexpr UINT kSrvHeapCount = 512;
 constexpr UINT kDeferredSrvBase = 400;
-constexpr UINT kCbAlign = 256;
-
-struct alignas(256) FrameCB
-{
-    XMFLOAT4X4 World;
-    XMFLOAT4X4 ViewProj;
-    XMFLOAT4 TimeCamPos;
-    XMFLOAT4 UvAnimAndPad;
-    float _PadRest[24];
-};
-
-static_assert(sizeof(FrameCB) == 256);
-
-struct alignas(256) MatCBGPU
-{
-    XMFLOAT4 Kd;
-    XMFLOAT2 UvScale;
-    XMFLOAT2 UvOffset;
-    XMFLOAT3 Ks;
-    float Ns;
-    UINT UseUvAnim;
-    UINT HasSpecularTex;
-    UINT IsEmissive;
-    UINT HasNormalMap;
-    UINT HasDisplacementMap;
-    UINT EnableTessellation;
-    float _PadMat[46];
-};
-
-static_assert(sizeof(MatCBGPU) == 256);
-
 HWND g_hwnd = nullptr;
 UINT g_width = kClientW;
 UINT g_height = kClientH;
 bool g_running = true;
 
-ComPtr<ID3D12Device> g_device;
-ComPtr<ID3D12CommandQueue> g_queue;
-ComPtr<IDXGIFactory6> g_factory;
-ComPtr<IDXGISwapChain3> g_swapChain;
-
-ComPtr<ID3D12DescriptorHeap> g_rtvHeap;
-UINT g_rtvDescriptorSize = 0;
-ComPtr<ID3D12Resource> g_renderTargets[kFrameCount];
-
-ComPtr<ID3D12DescriptorHeap> g_dsvHeap;
-ComPtr<ID3D12Resource> g_depthStencil;
-
-ComPtr<ID3D12CommandAllocator> g_cmdAlloc[kFrameCount];
-ComPtr<ID3D12GraphicsCommandList> g_cmdList;
-
-ComPtr<ID3D12Fence> g_fence;
-UINT64 g_fenceValue = 0;
-HANDLE g_fenceEvent = nullptr;
-UINT64 g_frameFenceValues[kFrameCount]{};
-bool g_swapSeenPresent[kFrameCount]{};
+D3D12Context g_d3d;
+auto& g_device = g_d3d.device;
+auto& g_queue = g_d3d.queue;
+auto& g_factory = g_d3d.factory;
+auto& g_swapChain = g_d3d.swapChain;
+auto& g_rtvHeap = g_d3d.rtvHeap;
+auto& g_rtvDescriptorSize = g_d3d.rtvDescriptorSize;
+auto& g_renderTargets = g_d3d.renderTargets;
+auto& g_dsvHeap = g_d3d.dsvHeap;
+auto& g_depthStencil = g_d3d.depthStencil;
+auto& g_cmdAlloc = g_d3d.commandAllocators;
+auto& g_cmdList = g_d3d.commandList;
+auto& g_fence = g_d3d.fence;
+auto& g_fenceValue = g_d3d.fenceValue;
+auto& g_fenceEvent = g_d3d.fenceEvent;
+auto& g_frameFenceValues = g_d3d.frameFenceValues;
+auto& g_swapSeenPresent = g_d3d.swapSeenPresent;
 
 ComPtr<ID3D12RootSignature> g_rootSignature;
 ComPtr<ID3D12PipelineState> g_pipelineGeo;
 ComPtr<ID3D12PipelineState> g_pipelineGeoWire;
 ComPtr<ID3D12PipelineState> g_pipelineGeoSimple;
+ComPtr<ID3D12PipelineState> g_pipelineGeoSimpleWire;
 
 RenderingSystem g_renderSys;
+SceneRenderer g_sceneRenderer;
 
 ComPtr<ID3D12DescriptorHeap> g_srvHeap;
 UINT g_srvDescriptorSize = 0;
 
-bool g_sceneReady = false;
-Obj::LoadedMesh g_mesh{};
-ComPtr<ID3D12Resource> g_meshVB;
-ComPtr<ID3D12Resource> g_meshIB;
-D3D12_VERTEX_BUFFER_VIEW g_meshVbv{};
-D3D12_INDEX_BUFFER_VIEW g_meshIbv{};
-
-std::vector<uint32_t> g_matSrvPairBase;
-std::vector<ComPtr<ID3D12Resource>> g_gpuTextures;
-ComPtr<ID3D12Resource> g_whiteTexture;
-ComPtr<ID3D12Resource> g_flatNormalTexture;
-ComPtr<ID3D12Resource> g_matCBUpload;
-UINT8* g_matCBMapped = nullptr;
-UINT g_matCount = 0;
-
-ComPtr<ID3D12Resource> g_frameCBUpload;
-UINT8* g_frameCBMapped = nullptr;
-
-ComPtr<ID3D12Resource> g_rainSphereVB;
-ComPtr<ID3D12Resource> g_rainSphereIB;
-D3D12_VERTEX_BUFFER_VIEW g_rainSphereVbv{};
-D3D12_INDEX_BUFFER_VIEW g_rainSphereIbv{};
-ComPtr<ID3D12Resource> g_rainSphereFrameCB;
-UINT8* g_rainSphereFrameCBMapped = nullptr;
-ComPtr<ID3D12Resource> g_rainSphereMatCB;
+RainSphereRenderer g_rainSphereRenderer;
 
 UINT g_frameIndex = 0;
 float g_appTime = 0.0f;
@@ -142,7 +89,9 @@ XMFLOAT3 g_camPos{0.0f, 1.4f, 4.5f};
 float g_camYaw = 0.0f;
 float g_camPitch = -0.12f;
 bool g_camPrevRmb = false;
-bool g_tessellationEnabled = true;
+// Sponza содержит много треугольников, поэтому тесселяция включается вручную клавишей T.
+// Так первый кадр гарантированно появляется даже на встроенной видеокарте.
+bool g_tessellationEnabled = false;
 bool g_wireframeEnabled = false;
 
 LARGE_INTEGER g_qpcFreq{};
@@ -159,48 +108,9 @@ void ThrowIfFailed(HRESULT hr)
     }
 }
 
-std::wstring ExeDirectory()
-{
-    wchar_t path[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring p(path);
-    const size_t slash = p.find_last_of(L"\\/");
-    if (slash != std::wstring::npos)
-        p.resize(slash + 1);
-    return p;
-}
-
-std::wstring DeferredShaderPath()
-{
-    return ExeDirectory() + L"Deferred.hlsl";
-}
-
-void CompileShader(const wchar_t* path, const char* entry, const char* target, ComPtr<ID3DBlob>& out)
-{
-    ComPtr<ID3DBlob> err;
-    UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
-#ifdef _DEBUG
-    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-    const HRESULT hr = D3DCompileFromFile(
-        path, nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, entry, target, flags, 0, &out, &err);
-    if (FAILED(hr))
-    {
-        if (err)
-            OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
-        ThrowIfFailed(hr);
-    }
-}
-
 void WaitForGpu()
 {
-    const UINT64 v = ++g_fenceValue;
-    ThrowIfFailed(g_queue->Signal(g_fence.Get(), v));
-    if (g_fence->GetCompletedValue() < v)
-    {
-        ThrowIfFailed(g_fence->SetEventOnCompletion(v, g_fenceEvent));
-        WaitForSingleObject(g_fenceEvent, INFINITE);
-    }
+    g_d3d.WaitForGpu();
 }
 
 void ExecuteCommandList()
@@ -211,112 +121,29 @@ void ExecuteCommandList()
     WaitForGpu();
 }
 
-D3D12_RESOURCE_BARRIER MakeTransition(ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-{
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = res;
-    b.Transition.StateBefore = before;
-    b.Transition.StateAfter = after;
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    return b;
-}
-
 void CreateRtv()
 {
-    D3D12_CPU_DESCRIPTOR_HANDLE h = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    for (UINT i = 0; i < kFrameCount; ++i)
-    {
-        ThrowIfFailed(g_swapChain->GetBuffer(i, IID_PPV_ARGS(&g_renderTargets[i])));
-        g_device->CreateRenderTargetView(g_renderTargets[i].Get(), nullptr, h);
-        h.ptr += static_cast<SIZE_T>(g_rtvDescriptorSize);
-    }
+    g_d3d.CreateRenderTargets();
 }
 
 void CreateDepth()
 {
-    D3D12_HEAP_PROPERTIES hp{};
-    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-    D3D12_RESOURCE_DESC ds{};
-    ds.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    ds.Width = g_width;
-    ds.Height = g_height;
-    ds.DepthOrArraySize = 1;
-    ds.MipLevels = 1;
-    ds.Format = DXGI_FORMAT_D32_FLOAT;
-    ds.SampleDesc.Count = 1;
-    ds.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    D3D12_CLEAR_VALUE cv{};
-    cv.Format = DXGI_FORMAT_D32_FLOAT;
-    cv.DepthStencil.Depth = 1.0f;
-    ThrowIfFailed(g_device->CreateCommittedResource(
-        &hp, D3D12_HEAP_FLAG_NONE, &ds, D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv,
-        IID_PPV_ARGS(&g_depthStencil)));
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
-    dsv.Format = DXGI_FORMAT_D32_FLOAT;
-    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    g_device->CreateDepthStencilView(g_depthStencil.Get(), &dsv, g_dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    g_d3d.CreateDepthBuffer(g_width, g_height);
 }
 
 void ResizeSwapChain(UINT w, UINT h)
 {
     if (!g_swapChain || w == 0 || h == 0)
         return;
-    WaitForGpu();
-    g_depthStencil.Reset();
-    for (UINT i = 0; i < kFrameCount; ++i)
-    {
-        g_renderTargets[i].Reset();
-        g_swapSeenPresent[i] = false;
-        g_frameFenceValues[i] = g_fence->GetCompletedValue();
-    }
-    DXGI_SWAP_CHAIN_DESC d{};
-    ThrowIfFailed(g_swapChain->GetDesc(&d));
-    ThrowIfFailed(g_swapChain->ResizeBuffers(kFrameCount, w, h, d.BufferDesc.Format, d.Flags));
+    g_d3d.Resize(w, h);
     g_width = w;
     g_height = h;
     g_frameIndex = g_swapChain->GetCurrentBackBufferIndex();
-    CreateRtv();
-    CreateDepth();
     if (g_srvHeap && g_device)
     {
         g_renderSys.Resize(
             g_device.Get(), w, h, g_srvHeap.Get(), g_srvDescriptorSize);
     }
-}
-
-ComPtr<ID3D12Resource> CreateUploadBuffer(const void* data, UINT64 size)
-{
-    D3D12_HEAP_PROPERTIES hp{};
-    hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-    D3D12_RESOURCE_DESC rd{};
-    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width = size;
-    rd.Height = 1;
-    rd.DepthOrArraySize = 1;
-    rd.MipLevels = 1;
-    rd.Format = DXGI_FORMAT_UNKNOWN;
-    rd.SampleDesc.Count = 1;
-    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    ComPtr<ID3D12Resource> buf;
-    ThrowIfFailed(g_device->CreateCommittedResource(
-        &hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buf)));
-    void* mapped = nullptr;
-    D3D12_RANGE rr{0, 0};
-    ThrowIfFailed(buf->Map(0, &rr, &mapped));
-    if (data != nullptr && size > 0)
-        std::memcpy(mapped, data, static_cast<size_t>(size));
-    else
-        std::memset(mapped, 0, static_cast<size_t>(size));
-    buf->Unmap(0, nullptr);
-    return buf;
-}
-
-void CreateFrameCB()
-{
-    g_frameCBUpload = CreateUploadBuffer(nullptr, sizeof(FrameCB));
-    D3D12_RANGE rr{0, 0};
-    ThrowIfFailed(g_frameCBUpload->Map(0, &rr, reinterpret_cast<void**>(&g_frameCBMapped)));
 }
 
 void UpdateWindowTitle()
@@ -330,36 +157,6 @@ void UpdateWindowTitle()
         g_tessellationEnabled ? L"ON" : L"OFF",
         g_wireframeEnabled ? L"ON" : L"OFF");
     SetWindowTextW(g_hwnd, title);
-}
-
-void CreateRainSphereResources()
-{
-    // Октаэдр: достаточно гладкий силуэт для маленького светящегося шарика,
-    // но всего 8 треугольников на каплю.
-    const Obj::MeshVertex vertices[] = {
-        {0, 1, 0, 0, 1, 0, 0, 0}, {1, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 1, 0, 0, 1, 0, 0}, {-1, 0, 0, -1, 0, 0, 0, 0},
-        {0, 0, -1, 0, 0, -1, 0, 0}, {0, -1, 0, 0, -1, 0, 0, 0},
-    };
-    const uint32_t indices[] = {0,1,2, 0,2,3, 0,3,4, 0,4,1, 5,2,1, 5,3,2, 5,4,3, 5,1,4};
-    g_rainSphereVB = CreateUploadBuffer(vertices, sizeof(vertices));
-    g_rainSphereIB = CreateUploadBuffer(indices, sizeof(indices));
-    g_rainSphereVbv = {g_rainSphereVB->GetGPUVirtualAddress(), sizeof(vertices), sizeof(Obj::MeshVertex)};
-    g_rainSphereIbv = {g_rainSphereIB->GetGPUVirtualAddress(), sizeof(indices), DXGI_FORMAT_R32_UINT};
-
-    g_rainSphereFrameCB = CreateUploadBuffer(nullptr, 125ull * kCbAlign);
-    D3D12_RANGE rr{0, 0};
-    ThrowIfFailed(g_rainSphereFrameCB->Map(0, &rr, reinterpret_cast<void**>(&g_rainSphereFrameCBMapped)));
-
-    g_rainSphereMatCB = CreateUploadBuffer(nullptr, kCbAlign);
-    MatCBGPU sphereMat{};
-    sphereMat.Kd = XMFLOAT4(0.25f, 0.65f, 1.0f, 1.0f);
-    sphereMat.UvScale = XMFLOAT2(1.0f, 1.0f);
-    sphereMat.IsEmissive = 1;
-    void* mapped = nullptr;
-    ThrowIfFailed(g_rainSphereMatCB->Map(0, &rr, &mapped));
-    std::memcpy(mapped, &sphereMat, sizeof(sphereMat));
-    g_rainSphereMatCB->Unmap(0, nullptr);
 }
 
 void CreateSrvHeap()
@@ -417,12 +214,12 @@ void CreateGeometryPipeline()
     ThrowIfFailed(g_device->CreateRootSignature(
         0, sigBlob->GetBufferPointer(), sigBlob->GetBufferSize(), IID_PPV_ARGS(&g_rootSignature)));
 
-    const std::wstring sp = DeferredShaderPath();
+    const std::wstring sp = AppPaths::DeferredShaderFile();
     ComPtr<ID3DBlob> vs, hs, ds, ps;
-    CompileShader(sp.c_str(), "GeometryVS", "vs_5_0", vs);
-    CompileShader(sp.c_str(), "TessellationHS", "hs_5_0", hs);
-    CompileShader(sp.c_str(), "TessellationDS", "ds_5_0", ds);
-    CompileShader(sp.c_str(), "GeometryPS", "ps_5_0", ps);
+    D3DHelpers::CompileShader(sp.c_str(), "GeometryVS", "vs_5_0", vs);
+    D3DHelpers::CompileShader(sp.c_str(), "TessellationHS", "hs_5_0", hs);
+    D3DHelpers::CompileShader(sp.c_str(), "TessellationDS", "ds_5_0", ds);
+    D3DHelpers::CompileShader(sp.c_str(), "GeometryPS", "ps_5_0", ps);
 
     const D3D12_INPUT_ELEMENT_DESC layout[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -449,7 +246,7 @@ void CreateGeometryPipeline()
     pso.NumRenderTargets = 3;
     pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    pso.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pso.RTVFormats[2] = DXGI_FORMAT_R32_FLOAT;
     pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pso.SampleDesc.Count = 1;
     pso.InputLayout = {layout, _countof(layout)};
@@ -464,469 +261,31 @@ void CreateGeometryPipeline()
     pso.DS = {};
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoSimple)));
-}
 
-std::filesystem::path FindSponzaObj()
-{
-    const std::wstring rels[] = {
-        L"Sponza\\sponza.obj",
-        L"Sponza/sponza.obj",
-        L"sponza.obj",
-    };
-
-    std::vector<std::filesystem::path> roots;
-    auto tryAdd = [&roots](std::filesystem::path p) {
-        if (p.empty())
-            return;
-        p = p.lexically_normal();
-        for (const auto& existing : roots)
-        {
-            if (existing == p)
-                return;
-        }
-        roots.push_back(std::move(p));
-    };
-
-    tryAdd(std::filesystem::path(ExeDirectory()));
-    try
-    {
-        tryAdd(std::filesystem::current_path());
-    }
-    catch (...)
-    {
-    }
-
-    // Расширяем базы родителями — только по индексу, без изменения вектора во время range-for.
-    const size_t scanCount = roots.size();
-    for (size_t i = 0; i < scanCount; ++i)
-    {
-        std::filesystem::path walk = roots[i];
-        for (int depth = 0; depth < 4 && !walk.empty(); ++depth)
-        {
-            walk = walk.parent_path();
-            tryAdd(walk);
-        }
-    }
-
-    for (const auto& root : roots)
-    {
-        if (root.empty())
-            continue;
-        for (const auto& rel : rels)
-        {
-            const std::filesystem::path candidate = root / rel;
-            if (std::filesystem::exists(candidate))
-                return candidate;
-        }
-    }
-    return {};
-}
-
-static bool MaterialPathSuggestUvAnim(const std::wstring& rel)
-{
-    std::wstring s = rel;
-    for (wchar_t& c : s)
-        c = static_cast<wchar_t>(towlower(static_cast<wint_t>(c)));
-
-    static const wchar_t* keys[] = {
-        L"fabric", L"curtain", L"banner", L"water", L"flag", L"vines", L"leaf", L"drape", nullptr};
-    for (int k = 0; keys[k] != nullptr; ++k)
-    {
-        if (s.find(keys[k]) != std::wstring::npos)
-            return true;
-    }
-    return false;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoSimpleWire)));
 }
 
 bool LoadScene()
 {
-    g_sceneReady = false;
-    g_mesh = {};
-    g_matSrvPairBase.clear();
-    g_gpuTextures.clear();
-    g_whiteTexture.Reset();
-    g_flatNormalTexture.Reset();
-    g_meshVB.Reset();
-    g_meshIB.Reset();
-    g_matCBUpload.Reset();
-    g_matCBMapped = nullptr;
-    g_matCount = 0;
-
-    const std::filesystem::path objPath = FindSponzaObj();
+    const std::filesystem::path objPath = ScenePaths::FindSponzaObj(AppPaths::ExecutableDirectory());
     if (objPath.empty())
-    {
-        MessageBoxW(
-            g_hwnd,
-            L"Не найден sponza.obj.\n\nСкопируйте папку Sponza (sponza.obj + MTL + текстуры) в каталог exe:\n"
-            L"  <папка_с_exe>\\Sponza\\sponza.obj",
-            L"Sponza",
-            MB_OK | MB_ICONWARNING);
         return false;
-    }
-
-    std::wstring err;
-    if (!Obj::LoadObj(objPath, g_mesh, err))
-    {
-        MessageBoxW(g_hwnd, err.c_str(), L"OBJ", MB_OK | MB_ICONERROR);
-        return false;
-    }
-
-    if (g_mesh.vertices.empty() || g_mesh.indices.empty() || g_mesh.submeshes.empty())
-    {
-        MessageBoxW(g_hwnd, L"OBJ пустой или без граней.", L"OBJ", MB_OK | MB_ICONERROR);
-        return false;
-    }
-
-    const UINT vbSize = static_cast<UINT>(g_mesh.vertices.size() * sizeof(Obj::MeshVertex));
-    const UINT ibSize = static_cast<UINT>(g_mesh.indices.size() * sizeof(uint32_t));
-    g_meshVB = CreateUploadBuffer(g_mesh.vertices.data(), vbSize);
-    g_meshIB = CreateUploadBuffer(g_mesh.indices.data(), ibSize);
-
-    g_meshVbv.BufferLocation = g_meshVB->GetGPUVirtualAddress();
-    g_meshVbv.SizeInBytes = vbSize;
-    g_meshVbv.StrideInBytes = sizeof(Obj::MeshVertex);
-    g_meshIbv.BufferLocation = g_meshIB->GetGPUVirtualAddress();
-    g_meshIbv.SizeInBytes = ibSize;
-    g_meshIbv.Format = DXGI_FORMAT_R32_UINT;
-
-    const std::filesystem::path mtlDir = objPath.parent_path();
-    g_matSrvPairBase.assign(g_mesh.materials.size(), 0);
-    std::vector<uint8_t> matHasSpecularTex(g_mesh.materials.size(), 0);
-    std::vector<uint8_t> matHasNormalMap(g_mesh.materials.size(), 0);
-    std::vector<uint8_t> matHasDisplacementMap(g_mesh.materials.size(), 0);
-
-    ThrowIfFailed(g_cmdAlloc[0]->Reset());
-    ThrowIfFailed(g_cmdList->Reset(g_cmdAlloc[0].Get(), nullptr));
-
-    std::vector<ComPtr<ID3D12Resource>> uploadKeep;
-    uint32_t nextSlot = 0;
-
-    ComPtr<ID3D12Resource> whiteTex;
-    if (!Tex::CreateSolidTexture2D(
-            g_device.Get(), g_cmdList.Get(), g_srvHeap.Get(), nextSlot, g_srvDescriptorSize, 0xFFFFFFFFu,
-            whiteTex, uploadKeep))
-    {
-        MessageBoxW(g_hwnd, L"Не удалось создать текстуру по умолчанию.", L"Текстуры", MB_OK | MB_ICONERROR);
-        return false;
-    }
-    g_whiteTexture = whiteTex;
-    g_gpuTextures.push_back(whiteTex);
-    Tex::WriteTexture2DSrv(
-        g_device.Get(), whiteTex.Get(), g_srvHeap.Get(), nextSlot + 1, g_srvDescriptorSize);
-    nextSlot += 2;
-
-    ComPtr<ID3D12Resource> flatNormal;
-    if (!Tex::CreateSolidTexture2D(
-            g_device.Get(), g_cmdList.Get(), g_srvHeap.Get(), nextSlot, g_srvDescriptorSize, 0xFFFF8080u,
-            flatNormal, uploadKeep))
-        return false;
-    g_flatNormalTexture = flatNormal;
-    g_gpuTextures.push_back(flatNormal);
-    nextSlot += 1;
-
-    std::unordered_map<std::wstring, ComPtr<ID3D12Resource>> texCache;
-
-    auto bindTextureSlot = [&](UINT slot, const std::filesystem::path& texPath) -> bool {
-        if (!std::filesystem::exists(texPath))
-        {
-            Tex::WriteTexture2DSrv(
-                g_device.Get(), g_whiteTexture.Get(), g_srvHeap.Get(), slot, g_srvDescriptorSize);
-            return false;
-        }
-        const std::wstring key = texPath.lexically_normal().wstring();
-        const auto cached = texCache.find(key);
-        if (cached != texCache.end())
-        {
-            Tex::WriteTexture2DSrv(
-                g_device.Get(), cached->second.Get(), g_srvHeap.Get(), slot, g_srvDescriptorSize);
-            return true;
-        }
-
-        ComPtr<ID3D12Resource> texRes;
-        std::wstring terr;
-        if (!Tex::CreateTexture2DFromFile(
-                g_device.Get(), g_cmdList.Get(), g_srvHeap.Get(), slot, g_srvDescriptorSize, texPath,
-                texRes, uploadKeep, terr))
-        {
-            Tex::WriteTexture2DSrv(
-                g_device.Get(), g_whiteTexture.Get(), g_srvHeap.Get(), slot, g_srvDescriptorSize);
-            return false;
-        }
-
-        g_gpuTextures.push_back(texRes);
-        texCache[key] = texRes;
-        return true;
-    };
-
-    for (size_t i = 0; i < g_mesh.materials.size(); ++i)
-    {
-        if (nextSlot + 4u > kSrvHeapCount)
-        {
-            MessageBoxW(g_hwnd, L"Переполнение кучи SRV.", L"Текстуры", MB_OK | MB_ICONWARNING);
-            break;
-        }
-
-        const uint32_t pairBase = nextSlot;
-        nextSlot += 4;
-        g_matSrvPairBase[i] = pairBase;
-
-        const Obj::Material& m = g_mesh.materials[i];
-
-        if (m.diffuseMapRel.empty())
-            Tex::WriteTexture2DSrv(
-                g_device.Get(), g_whiteTexture.Get(), g_srvHeap.Get(), pairBase, g_srvDescriptorSize);
-        else
-            bindTextureSlot(pairBase, Tex::ResolveTexturePathInTexturesFolder(mtlDir, m.diffuseMapRel));
-
-        bool specLoaded = false;
-        if (m.specularMapRel.empty())
-            Tex::WriteTexture2DSrv(
-                g_device.Get(), g_whiteTexture.Get(), g_srvHeap.Get(), pairBase + 1, g_srvDescriptorSize);
-        else
-            specLoaded =
-                bindTextureSlot(pairBase + 1, Tex::ResolveTexturePathInTexturesFolder(mtlDir, m.specularMapRel));
-
-        matHasSpecularTex[i] = specLoaded ? 1 : 0;
-
-        const std::filesystem::path diffusePath = Tex::ResolveTexturePathInTexturesFolder(mtlDir, m.diffuseMapRel);
-        std::wstring textureStem = diffusePath.stem().wstring();
-        if (textureStem.ends_with(L"_diff"))
-            textureStem.resize(textureStem.size() - 5);
-        else if (textureStem.ends_with(L"_dif"))
-            textureStem.resize(textureStem.size() - 4);
-        const std::filesystem::path normalPath = diffusePath.parent_path() / (textureStem + L"_ddn.tga");
-        const std::filesystem::path displacementPath = diffusePath.parent_path() /
-            (diffusePath.stem().wstring() + L"_displacement.tga");
-        const bool normalLoaded = bindTextureSlot(pairBase + 2, normalPath);
-        if (!normalLoaded)
-            Tex::WriteTexture2DSrv(g_device.Get(), g_flatNormalTexture.Get(), g_srvHeap.Get(), pairBase + 2, g_srvDescriptorSize);
-        const bool displacementLoaded = bindTextureSlot(pairBase + 3, displacementPath);
-        matHasNormalMap[i] = normalLoaded ? 1 : 0;
-        matHasDisplacementMap[i] = displacementLoaded ? 1 : 0;
-    }
-
-    ExecuteCommandList();
-    uploadKeep.clear();
-
-    ThrowIfFailed(g_cmdAlloc[0]->Reset());
-    ThrowIfFailed(g_cmdList->Reset(g_cmdAlloc[0].Get(), g_pipelineGeo.Get()));
-    ThrowIfFailed(g_cmdList->Close());
-
-    g_matCount = static_cast<UINT>(g_mesh.materials.size());
-    if (g_matCount == 0)
-        g_matCount = 1;
-
-    const UINT64 matBufSize = static_cast<UINT64>(g_matCount) * kCbAlign;
-    g_matCBUpload = CreateUploadBuffer(nullptr, matBufSize);
-    D3D12_RANGE mr{0, 0};
-    ThrowIfFailed(g_matCBUpload->Map(0, &mr, reinterpret_cast<void**>(&g_matCBMapped)));
-
-    for (UINT i = 0; i < g_matCount; ++i)
-    {
-        MatCBGPU* slot = reinterpret_cast<MatCBGPU*>(g_matCBMapped + static_cast<size_t>(i) * kCbAlign);
-        std::memset(slot, 0, sizeof(MatCBGPU));
-        if (i < g_mesh.materials.size())
-        {
-            const Obj::Material& mm = g_mesh.materials[i];
-            slot->Kd = XMFLOAT4(mm.Kd[0], mm.Kd[1], mm.Kd[2], 1.0f);
-            slot->UvScale = XMFLOAT2(mm.uvScale[0], mm.uvScale[1]);
-            slot->UvOffset = XMFLOAT2(mm.uvOffset[0], mm.uvOffset[1]);
-            slot->Ks = XMFLOAT3(mm.Ks[0], mm.Ks[1], mm.Ks[2]);
-            slot->Ns = mm.Ns;
-            slot->UseUvAnim = MaterialPathSuggestUvAnim(mm.diffuseMapRel) ? 1u : 0u;
-            slot->HasSpecularTex = matHasSpecularTex[i];
-            slot->HasNormalMap = matHasNormalMap[i];
-            slot->HasDisplacementMap = matHasDisplacementMap[i];
-            // Тесселируем массивные поверхности с height map. Тонкие объекты
-            // (ткань, цепи, вазы) остаются исходной геометрией.
-            const bool tessellateMaterial =
-                mm.name == "floor" || mm.name == "bricks" || mm.name == "arch" ||
-                mm.name == "ceiling" || mm.name == "column_a" || mm.name == "column_b" ||
-                mm.name == "column_c" || mm.name == "details" || mm.name == "roof" ||
-                mm.name == "thorn";
-            slot->EnableTessellation = (matHasDisplacementMap[i] && tessellateMaterial) ? 1u : 0u;
-        }
-        else
-        {
-            slot->Kd = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
-            slot->UvScale = XMFLOAT2(1.0f, 1.0f);
-            slot->UvOffset = XMFLOAT2(0.0f, 0.0f);
-            slot->Ks = XMFLOAT3(0.2f, 0.2f, 0.2f);
-            slot->Ns = 32.0f;
-        }
-    }
-
-    g_sceneReady = true;
-    return true;
-}
-
-void WriteFrameCB(const XMMATRIX& world, const XMMATRIX& viewProj, float timeSec)
-{
-    FrameCB data{};
-    XMStoreFloat4x4(&data.World, world);
-    XMStoreFloat4x4(&data.ViewProj, viewProj);
-    data.TimeCamPos =
-        XMFLOAT4(timeSec, g_camPos.x, g_camPos.y, g_camPos.z);
-    data.UvAnimAndPad = XMFLOAT4(0.035f, 0.022f, 0.0f, 0.0f);
-    data.UvAnimAndPad.z = g_tessellationEnabled ? 1.0f : 0.0f;
-    std::memcpy(g_frameCBMapped, &data, sizeof(FrameCB));
-}
-
-XMVECTOR CameraForwardVector()
-{
-    return XMVector3Normalize(XMVectorSet(
-        sinf(g_camYaw) * cosf(g_camPitch), sinf(g_camPitch), cosf(g_camYaw) * cosf(g_camPitch), 0.0f));
-}
-
-XMMATRIX CalcViewProj()
-{
-    const XMVECTOR eye = XMLoadFloat3(&g_camPos);
-    const XMVECTOR dir = CameraForwardVector();
-    const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-    const XMMATRIX view = XMMatrixLookToLH(eye, dir, up);
-    const float aspect = static_cast<float>(g_width) / static_cast<float>((std::max)(1u, g_height));
-    const XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, aspect, 0.1f, 500.0f);
-    return view * proj;
-}
-
-void UpdateCamera(float dt)
-{
-    if (!g_hwnd || dt <= 0.0f)
-        return;
-
-    constexpr float moveSpeed = 4.0f;
-    constexpr float lookSpeed = 0.0022f;
-
-    if ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0)
-    {
-        RECT cr{};
-        GetClientRect(g_hwnd, &cr);
-        POINT center{(cr.right - cr.left) / 2, (cr.bottom - cr.top) / 2};
-        ClientToScreen(g_hwnd, &center);
-        POINT cur{};
-        GetCursorPos(&cur);
-        if (g_camPrevRmb)
-        {
-            g_camYaw += static_cast<float>(cur.x - center.x) * lookSpeed;
-            g_camPitch -= static_cast<float>(cur.y - center.y) * lookSpeed;
-            g_camPitch = std::clamp(g_camPitch, -XM_PIDIV2 + 0.02f, XM_PIDIV2 - 0.02f);
-        }
-        SetCursorPos(center.x, center.y);
-        g_camPrevRmb = true;
-
-        POINT ul{0, 0};
-        ClientToScreen(g_hwnd, &ul);
-        POINT br{cr.right, cr.bottom};
-        ClientToScreen(g_hwnd, &br);
-        const RECT clip{ul.x, ul.y, br.x, br.y};
-        ClipCursor(&clip);
-    }
-    else
-    {
-        ClipCursor(nullptr);
-        g_camPrevRmb = false;
-    }
-
-    float moveX = 0.0f;
-    float moveZ = 0.0f;
-    float moveY = 0.0f;
-    if ((GetAsyncKeyState('W') & 0x8000) != 0)
-        moveZ += 1.0f;
-    if ((GetAsyncKeyState('S') & 0x8000) != 0)
-        moveZ -= 1.0f;
-    if ((GetAsyncKeyState('D') & 0x8000) != 0)
-        moveX += 1.0f;
-    if ((GetAsyncKeyState('A') & 0x8000) != 0)
-        moveX -= 1.0f;
-    if ((GetAsyncKeyState(VK_SPACE) & 0x8000) != 0)
-        moveY += 1.0f;
-    if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0)
-        moveY -= 1.0f;
-
-    const XMVECTOR forward = CameraForwardVector();
-    const XMVECTOR worldUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-    const XMVECTOR right = XMVector3Normalize(XMVector3Cross(worldUp, forward));
-    XMVECTOR delta =
-        XMVectorScale(forward, moveZ) + XMVectorScale(right, moveX) + XMVectorScale(worldUp, moveY);
-    if (XMVectorGetX(XMVector3LengthSq(delta)) > 1e-8f)
-    {
-        delta = XMVector3Normalize(delta);
-        XMVECTOR pos = XMLoadFloat3(&g_camPos);
-        pos = XMVectorAdd(pos, XMVectorScale(delta, moveSpeed * dt));
-        XMStoreFloat3(&g_camPos, pos);
-    }
+    return g_sceneRenderer.Load(
+        g_device.Get(), g_queue.Get(), g_cmdAlloc[0].Get(), g_cmdList.Get(),
+        g_srvHeap.Get(), g_srvDescriptorSize, objPath);
 }
 
 void DrawScene(const XMMATRIX& viewProj)
 {
-    if (!g_sceneReady)
-        return;
+    ID3D12PipelineState* pipeline =
+        g_wireframeEnabled ? g_pipelineGeoSimpleWire.Get() : g_pipelineGeoSimple.Get();
+    if (g_tessellationEnabled)
+        pipeline = g_wireframeEnabled ? g_pipelineGeoWire.Get() : g_pipelineGeo.Get();
 
-    ID3D12DescriptorHeap* heaps[] = {g_srvHeap.Get()};
-    g_cmdList->SetDescriptorHeaps(1, heaps);
-    g_cmdList->SetGraphicsRootSignature(g_rootSignature.Get());
-    g_cmdList->SetPipelineState(g_wireframeEnabled ? g_pipelineGeoWire.Get() : g_pipelineGeo.Get());
-
-    const XMMATRIX world =
-        XMMatrixScaling(0.01f, 0.01f, 0.01f) * XMMatrixRotationX(XM_PI);
-    WriteFrameCB(world, viewProj, g_appTime);
-    g_cmdList->SetGraphicsRootConstantBufferView(0, g_frameCBUpload->GetGPUVirtualAddress());
-
-    g_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
-    g_cmdList->IASetVertexBuffers(0, 1, &g_meshVbv);
-    g_cmdList->IASetIndexBuffer(&g_meshIbv);
-
-    const D3D12_GPU_DESCRIPTOR_HANDLE srvHeapStart = g_srvHeap->GetGPUDescriptorHandleForHeapStart();
-    for (const Obj::Submesh& sm : g_mesh.submeshes)
-    {
-        if (sm.materialIndex >= g_matSrvPairBase.size())
-            continue;
-
-        g_cmdList->SetGraphicsRootConstantBufferView(
-            1, g_matCBUpload->GetGPUVirtualAddress() + static_cast<UINT64>(sm.materialIndex) * kCbAlign);
-
-        const UINT pairBase = g_matSrvPairBase[sm.materialIndex];
-        D3D12_GPU_DESCRIPTOR_HANDLE table = srvHeapStart;
-        table.ptr += static_cast<SIZE_T>(pairBase) * g_srvDescriptorSize;
-        g_cmdList->SetGraphicsRootDescriptorTable(2, table);
-        g_cmdList->DrawIndexedInstanced(sm.indexCount, 1, sm.indexStart, 0, 0);
-    }
-}
-
-void DrawRainLightSpheres(const XMMATRIX& viewProj)
-{
-    const auto& drops = g_renderSys.RainLights();
-    if (drops.empty())
-        return;
-
-    ID3D12DescriptorHeap* heaps[] = {g_srvHeap.Get()};
-    g_cmdList->SetDescriptorHeaps(1, heaps);
-    g_cmdList->SetGraphicsRootSignature(g_rootSignature.Get());
-    g_cmdList->SetPipelineState(g_pipelineGeoSimple.Get());
-    g_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_cmdList->IASetVertexBuffers(0, 1, &g_rainSphereVbv);
-    g_cmdList->IASetIndexBuffer(&g_rainSphereIbv);
-    g_cmdList->SetGraphicsRootConstantBufferView(1, g_rainSphereMatCB->GetGPUVirtualAddress());
-    g_cmdList->SetGraphicsRootDescriptorTable(2, g_srvHeap->GetGPUDescriptorHandleForHeapStart());
-
-    constexpr float kSphereRadius = 0.045f;
-    constexpr float kHoverAboveLight = 0.075f;
-    for (UINT i = 0; i < drops.size() && i < 125; ++i)
-    {
-        FrameCB cb{};
-        const XMMATRIX world = XMMatrixScaling(kSphereRadius, kSphereRadius, kSphereRadius) *
-            XMMatrixTranslation(
-                drops[i].position.x,
-                drops[i].position.y - kHoverAboveLight,
-                drops[i].position.z);
-        XMStoreFloat4x4(&cb.World, world);
-        XMStoreFloat4x4(&cb.ViewProj, viewProj);
-        cb.TimeCamPos = XMFLOAT4(g_appTime, g_camPos.x, g_camPos.y, g_camPos.z);
-        std::memcpy(g_rainSphereFrameCBMapped + static_cast<size_t>(i) * kCbAlign, &cb, sizeof(cb));
-        g_cmdList->SetGraphicsRootConstantBufferView(
-            0, g_rainSphereFrameCB->GetGPUVirtualAddress() + static_cast<UINT64>(i) * kCbAlign);
-        g_cmdList->DrawIndexedInstanced(24, 1, 0, 0, 0);
-    }
+    g_sceneRenderer.Draw(
+        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), pipeline,
+        viewProj, g_camPos, g_appTime, g_tessellationEnabled);
 }
 
 void DrawFrame(float dt)
@@ -940,12 +299,15 @@ void DrawFrame(float dt)
         WaitForSingleObject(g_fenceEvent, INFINITE);
     }
 
-    UpdateCamera(dt);
+    Camera::Update(g_hwnd, dt, g_camPos, g_camYaw, g_camPitch, g_camPrevRmb);
     g_appTime += dt;
-    const XMMATRIX viewProj = CalcViewProj();
+    const XMMATRIX viewProj = Camera::ViewProjection(g_camPos, g_camYaw, g_camPitch, g_width, g_height);
 
     ThrowIfFailed(g_cmdAlloc[g_frameIndex]->Reset());
-    ThrowIfFailed(g_cmdList->Reset(g_cmdAlloc[g_frameIndex].Get(), g_pipelineGeo.Get()));
+    ID3D12PipelineState* initialPipeline = g_tessellationEnabled
+        ? (g_wireframeEnabled ? g_pipelineGeoWire.Get() : g_pipelineGeo.Get())
+        : (g_wireframeEnabled ? g_pipelineGeoSimpleWire.Get() : g_pipelineGeoSimple.Get());
+    ThrowIfFailed(g_cmdList->Reset(g_cmdAlloc[g_frameIndex].Get(), initialPipeline));
 
     GBuffer& gb = g_renderSys.GBufferTargets();
     gb.TransitionToRenderTargets(g_cmdList.Get());
@@ -962,26 +324,28 @@ void DrawFrame(float dt)
     g_cmdList->RSSetScissorRects(1, &scissor);
 
     DrawScene(viewProj);
-    DrawRainLightSpheres(viewProj);
+    g_rainSphereRenderer.Draw(
+        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineGeoSimple.Get(),
+        g_renderSys.RainLights(), viewProj, g_camPos, g_appTime);
 
     gb.TransitionToShaderResource(g_cmdList.Get());
 
     ComPtr<ID3D12Resource> backBuffer = g_renderTargets[g_frameIndex];
     const D3D12_RESOURCE_STATES rtBefore =
         g_swapSeenPresent[g_frameIndex] ? D3D12_RESOURCE_STATE_PRESENT : D3D12_RESOURCE_STATE_COMMON;
-    D3D12_RESOURCE_BARRIER toRt = MakeTransition(backBuffer.Get(), rtBefore, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_RESOURCE_BARRIER toRt = D3DHelpers::Transition(backBuffer.Get(), rtBefore, D3D12_RESOURCE_STATE_RENDER_TARGET);
     g_cmdList->ResourceBarrier(1, &toRt);
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(g_frameIndex) * g_rtvDescriptorSize;
 
     XMFLOAT3 camForward{};
-    XMStoreFloat3(&camForward, CameraForwardVector());
-    g_renderSys.UploadFrameConstants(g_camPos, camForward, g_width, g_height, dt);
+    XMStoreFloat3(&camForward, Camera::Forward(g_camYaw, g_camPitch));
+    g_renderSys.UploadFrameConstants(g_camPos, camForward, viewProj, g_width, g_height, dt);
     g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
 
     D3D12_RESOURCE_BARRIER toPresent =
-        MakeTransition(backBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        D3DHelpers::Transition(backBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     g_cmdList->ResourceBarrier(1, &toPresent);
     g_swapSeenPresent[g_frameIndex] = true;
 
@@ -1066,8 +430,7 @@ void InitD3D(HWND hwnd)
     if (!g_fenceEvent)
         ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
 
-    CreateFrameCB();
-    CreateRainSphereResources();
+    ThrowIfFailed(g_rainSphereRenderer.Initialize(g_device.Get()));
     CreateSrvHeap();
     CreateGeometryPipeline();
     g_renderSys.Init(
@@ -1077,18 +440,21 @@ void InitD3D(HWND hwnd)
         g_srvHeap.Get(),
         kDeferredSrvBase,
         g_srvDescriptorSize,
-        DeferredShaderPath().c_str());
-    LoadScene();
+        AppPaths::DeferredShaderFile().c_str());
+    if (!LoadScene())
+    {
+        MessageBoxW(
+            hwnd,
+            L"Не удалось загрузить сцену Sponza. Проверьте наличие папки Sponza, файла sponza.obj и текстур рядом с исполняемым файлом.",
+            L"SecondSem CG — ошибка загрузки сцены",
+            MB_OK | MB_ICONERROR);
+        std::exit(EXIT_FAILURE);
+    }
 }
 
 void ShutdownD3D()
 {
-    WaitForGpu();
-    if (g_fenceEvent)
-    {
-        CloseHandle(g_fenceEvent);
-        g_fenceEvent = nullptr;
-    }
+    g_d3d.Shutdown();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -1150,6 +516,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 
     InitD3D(g_hwnd);
     UpdateWindowTitle();
+    QueryPerformanceFrequency(&g_qpcFreq);
+    QueryPerformanceCounter(&g_qpcLast);
+
+    // Окно показывается только после загрузки Sponza, шейдеров и ресурсов GPU.
     ShowWindow(g_hwnd, SW_SHOW);
     UpdateWindow(g_hwnd);
 
