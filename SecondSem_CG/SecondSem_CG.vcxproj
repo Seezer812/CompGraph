@@ -162,6 +162,7 @@
     <ClCompile Include="D3DHelpers.cpp" />
     <ClCompile Include="ScenePaths.cpp" />
     <ClCompile Include="SceneRenderer.cpp" />
+    <ClCompile Include="SpatialCulling.cpp" />
     <ClCompile Include="AppPaths.cpp" />
     <ClCompile Include="D3D12Context.cpp" />
     <ClCompile Include="WaveWallRenderer.cpp" />
@@ -175,6 +176,7 @@
     <ClInclude Include="D3DHelpers.h" />
     <ClInclude Include="ScenePaths.h" />
     <ClInclude Include="SceneRenderer.h" />
+    <ClInclude Include="SpatialCulling.h" />
     <ClInclude Include="AppPaths.h" />
     <ClInclude Include="D3D12Context.h" />
     <ClInclude Include="WaveWallRenderer.h" />

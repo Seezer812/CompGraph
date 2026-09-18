@@ -39,6 +39,9 @@
     <ClCompile Include="SceneRenderer.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="SpatialCulling.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
     <ClCompile Include="AppPaths.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
@@ -63,6 +66,9 @@
       <Filter>Исходные файлы</Filter>
     </ClInclude>
     <ClInclude Include="SceneRenderer.h">
+      <Filter>Исходные файлы</Filter>
+    </ClInclude>
+    <ClInclude Include="SpatialCulling.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
     <ClInclude Include="AppPaths.h">

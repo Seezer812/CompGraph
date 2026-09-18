@@ -10,7 +10,9 @@ using namespace DirectX;
 namespace
 {
 constexpr UINT kCbAlignment = 256;
-constexpr UINT kMaxRainSpheres = 125;
+constexpr UINT kRainSphereCount = 125;
+constexpr UINT kSpatialObjectCount = 2000;
+constexpr UINT kMaxSpheres = kRainSphereCount + kSpatialObjectCount;
 
 struct alignas(256) FrameConstants
 {
@@ -81,7 +83,7 @@ HRESULT RainSphereRenderer::Initialize(ID3D12Device* device)
     HRESULT hr = CreateUploadBuffer(device, vertices, sizeof(vertices), m_vertexBuffer);
     if (FAILED(hr)) return hr;
     if (FAILED(hr = CreateUploadBuffer(device, indices, sizeof(indices), m_indexBuffer))) return hr;
-    if (FAILED(hr = CreateUploadBuffer(device, nullptr, kMaxRainSpheres * kCbAlignment, m_frameConstants))) return hr;
+    if (FAILED(hr = CreateUploadBuffer(device, nullptr, kMaxSpheres * kCbAlignment, m_frameConstants))) return hr;
     if (FAILED(hr = CreateUploadBuffer(device, nullptr, kCbAlignment, m_materialConstants))) return hr;
 
     m_vertexView = {m_vertexBuffer->GetGPUVirtualAddress(), sizeof(vertices), sizeof(Obj::MeshVertex)};
@@ -93,6 +95,7 @@ HRESULT RainSphereRenderer::Initialize(ID3D12Device* device)
     if (FAILED(hr = m_materialConstants->Map(0, &readRange, &mapped))) return hr;
     std::memcpy(mapped, &material, sizeof(material));
     m_materialConstants->Unmap(0, nullptr);
+    m_spatialObjects.Generate(kSpatialObjectCount);
     return S_OK;
 }
 
@@ -100,9 +103,12 @@ void RainSphereRenderer::Draw(
     ID3D12GraphicsCommandList* commandList, ID3D12DescriptorHeap* srvHeap,
     ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState,
     const std::vector<RenderingSystem::RainLight>& drops, const XMMATRIX& viewProjection,
-    const XMFLOAT3& cameraPosition, float timeSeconds)
+    const XMFLOAT3& cameraPosition, float timeSeconds, bool frustumCulling,
+    bool octreeCulling, SpatialCulling::Stats& cullingStats)
 {
-    if (drops.empty()) return;
+    const std::vector<uint32_t> visible = m_spatialObjects.FindVisible(
+        viewProjection, frustumCulling, octreeCulling, cullingStats);
+    if (drops.empty() && visible.empty()) return;
     ID3D12DescriptorHeap* heaps[] = {srvHeap};
     commandList->SetDescriptorHeaps(1, heaps);
     commandList->SetGraphicsRootSignature(rootSignature);
@@ -115,16 +121,31 @@ void RainSphereRenderer::Draw(
 
     constexpr float radius = 0.045f;
     constexpr float hover = 0.075f;
-    for (UINT i = 0; i < drops.size() && i < kMaxRainSpheres; ++i)
+    UINT constantIndex = 0;
+    for (UINT i = 0; i < drops.size() && i < kRainSphereCount; ++i, ++constantIndex)
     {
         FrameConstants frame{};
         XMStoreFloat4x4(&frame.world, XMMatrixScaling(radius, radius, radius) *
             XMMatrixTranslation(drops[i].position.x, drops[i].position.y - hover, drops[i].position.z));
         XMStoreFloat4x4(&frame.viewProjection, viewProjection);
         frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z);
-        std::memcpy(m_frameConstantsMapped + static_cast<size_t>(i) * kCbAlignment, &frame, sizeof(frame));
+        std::memcpy(m_frameConstantsMapped + static_cast<size_t>(constantIndex) * kCbAlignment, &frame, sizeof(frame));
         commandList->SetGraphicsRootConstantBufferView(
-            0, m_frameConstants->GetGPUVirtualAddress() + static_cast<UINT64>(i) * kCbAlignment);
+            0, m_frameConstants->GetGPUVirtualAddress() + static_cast<UINT64>(constantIndex) * kCbAlignment);
         commandList->DrawIndexedInstanced(24, 1, 0, 0, 0);
+    }
+    for (uint32_t objectIndex : visible)
+    {
+        const auto& object = m_spatialObjects.Objects()[objectIndex];
+        FrameConstants frame{};
+        XMStoreFloat4x4(&frame.world, XMMatrixScaling(object.radius, object.radius, object.radius) *
+            XMMatrixTranslation(object.position.x, object.position.y, object.position.z));
+        XMStoreFloat4x4(&frame.viewProjection, viewProjection);
+        frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z);
+        std::memcpy(m_frameConstantsMapped + static_cast<size_t>(constantIndex) * kCbAlignment, &frame, sizeof(frame));
+        commandList->SetGraphicsRootConstantBufferView(
+            0, m_frameConstants->GetGPUVirtualAddress() + static_cast<UINT64>(constantIndex) * kCbAlignment);
+        commandList->DrawIndexedInstanced(24, 1, 0, 0, 0);
+        ++constantIndex;
     }
 }

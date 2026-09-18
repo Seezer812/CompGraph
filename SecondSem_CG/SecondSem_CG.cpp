@@ -22,6 +22,7 @@
 #include "SceneRenderer.h"
 #include "WaveWallRenderer.h"
 #include "RenderingSystem.h"
+#include "SpatialCulling.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -97,6 +98,8 @@ bool g_camPrevRmb = false;
 // Так первый кадр гарантированно появляется даже на встроенной видеокарте.
 bool g_tessellationEnabled = false;
 bool g_wireframeEnabled = false;
+bool g_frustumCullingEnabled = true;
+SpatialCulling::Stats g_cullingStats{};
 
 LARGE_INTEGER g_qpcFreq{};
 LARGE_INTEGER g_qpcLast{};
@@ -154,12 +157,14 @@ void UpdateWindowTitle()
 {
     if (!g_hwnd)
         return;
-    wchar_t title[192]{};
+    wchar_t title[320]{};
     swprintf_s(
         title,
-        L"SecondSem CG — Sponza | T: tessellation %s | R: edges %s",
+        L"SecondSem CG | T: tessellation %s | R: edges %s | F: frustum + octree %s | objects: %u/2000, tests: %u obj / %u nodes",
         g_tessellationEnabled ? L"ON" : L"OFF",
-        g_wireframeEnabled ? L"ON" : L"OFF");
+        g_wireframeEnabled ? L"ON" : L"OFF",
+        g_frustumCullingEnabled ? L"ON" : L"OFF",
+        g_cullingStats.visibleObjects, g_cullingStats.objectTests, g_cullingStats.nodeTests);
     SetWindowTextW(g_hwnd, title);
 }
 
@@ -349,7 +354,9 @@ void DrawFrame(float dt)
     DrawScene(viewProj);
     g_rainSphereRenderer.Draw(
         g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineGeoSimple.Get(),
-        g_renderSys.RainLights(), viewProj, g_camPos, g_appTime);
+        g_renderSys.RainLights(), viewProj, g_camPos, g_appTime, g_frustumCullingEnabled,
+        true, g_cullingStats);
+    UpdateWindowTitle();
 
     gb.TransitionToShaderResource(g_cmdList.Get());
 
@@ -495,6 +502,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (wp == 'R' && (lp & (1ll << 30)) == 0)
         {
             g_wireframeEnabled = !g_wireframeEnabled;
+            UpdateWindowTitle();
+        }
+        else if (wp == 'F' && (lp & (1ll << 30)) == 0)
+        {
+            g_frustumCullingEnabled = !g_frustumCullingEnabled;
             UpdateWindowTitle();
         }
         return 0;

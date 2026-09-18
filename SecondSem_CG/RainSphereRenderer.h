@@ -5,11 +5,13 @@
 #include <wrl/client.h>
 
 #include "RenderingSystem.h"
+#include "SpatialCulling.h"
 
 class RainSphereRenderer
 {
 public:
     HRESULT Initialize(ID3D12Device* device);
+    uint32_t SpatialNodeCount() const { return m_spatialObjects.NodeCount(); }
 
     void Draw(
         ID3D12GraphicsCommandList* commandList,
@@ -19,7 +21,10 @@ public:
         const std::vector<RenderingSystem::RainLight>& drops,
         const DirectX::XMMATRIX& viewProjection,
         const DirectX::XMFLOAT3& cameraPosition,
-        float timeSeconds);
+        float timeSeconds,
+        bool frustumCulling,
+        bool octreeCulling,
+        SpatialCulling::Stats& cullingStats);
 
 private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_vertexBuffer;
@@ -29,4 +34,5 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_frameConstants;
     uint8_t* m_frameConstantsMapped = nullptr;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_materialConstants;
+    SpatialCulling m_spatialObjects;
 };
