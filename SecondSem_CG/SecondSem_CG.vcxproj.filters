@@ -45,6 +45,9 @@
     <ClCompile Include="D3D12Context.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="WaveWallRenderer.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Camera.h">
@@ -68,9 +71,15 @@
     <ClInclude Include="D3D12Context.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
+    <ClInclude Include="WaveWallRenderer.h">
+      <Filter>Исходные файлы</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="Deferred.hlsl">
+    <None Include="GeometryPass.hlsl">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
+    <None Include="LightingPass.hlsl">
       <Filter>Файлы ресурсов</Filter>
     </None>
   </ItemGroup>

@@ -15,8 +15,13 @@ std::wstring ExecutableDirectory()
     return directory;
 }
 
-std::wstring DeferredShaderFile()
+std::wstring GeometryShaderFile()
 {
-    return ExecutableDirectory() + L"Deferred.hlsl";
+    return ExecutableDirectory() + L"GeometryPass.hlsl";
+}
+
+std::wstring LightingShaderFile()
+{
+    return ExecutableDirectory() + L"LightingPass.hlsl";
 }
 } // namespace AppPaths

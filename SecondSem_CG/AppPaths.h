@@ -5,5 +5,6 @@
 namespace AppPaths
 {
 std::wstring ExecutableDirectory();
-std::wstring DeferredShaderFile();
+std::wstring GeometryShaderFile();
+std::wstring LightingShaderFile();
 } // namespace AppPaths

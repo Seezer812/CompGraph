@@ -20,6 +20,7 @@
 #include "D3DHelpers.h"
 #include "ScenePaths.h"
 #include "SceneRenderer.h"
+#include "WaveWallRenderer.h"
 #include "RenderingSystem.h"
 
 #include <algorithm>
@@ -73,9 +74,12 @@ ComPtr<ID3D12PipelineState> g_pipelineGeo;
 ComPtr<ID3D12PipelineState> g_pipelineGeoWire;
 ComPtr<ID3D12PipelineState> g_pipelineGeoSimple;
 ComPtr<ID3D12PipelineState> g_pipelineGeoSimpleWire;
+ComPtr<ID3D12PipelineState> g_pipelineWaveWall;
+ComPtr<ID3D12PipelineState> g_pipelineWaveWallWire;
 
 RenderingSystem g_renderSys;
 SceneRenderer g_sceneRenderer;
+WaveWallRenderer g_waveWallRenderer;
 
 ComPtr<ID3D12DescriptorHeap> g_srvHeap;
 UINT g_srvDescriptorSize = 0;
@@ -214,7 +218,7 @@ void CreateGeometryPipeline()
     ThrowIfFailed(g_device->CreateRootSignature(
         0, sigBlob->GetBufferPointer(), sigBlob->GetBufferSize(), IID_PPV_ARGS(&g_rootSignature)));
 
-    const std::wstring sp = AppPaths::DeferredShaderFile();
+    const std::wstring sp = AppPaths::GeometryShaderFile();
     ComPtr<ID3DBlob> vs, hs, ds, ps;
     D3DHelpers::CompileShader(sp.c_str(), "GeometryVS", "vs_5_0", vs);
     D3DHelpers::CompileShader(sp.c_str(), "TessellationHS", "hs_5_0", hs);
@@ -255,8 +259,22 @@ void CreateGeometryPipeline()
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoWire)));
 
+    // Quad-domain pipeline for the procedural wave wall.
+    ComPtr<ID3DBlob> wallHs, wallDs;
+    D3DHelpers::CompileShader(sp.c_str(), "WaveWallHS", "hs_5_0", wallHs);
+    D3DHelpers::CompileShader(sp.c_str(), "WaveWallDS", "ds_5_0", wallDs);
+    pso.HS = {wallHs->GetBufferPointer(), wallHs->GetBufferSize()};
+    pso.DS = {wallDs->GetBufferPointer(), wallDs->GetBufferSize()};
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    // This panel is a visible deformation overlay, so both sides must be rendered.
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineWaveWall)));
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineWaveWallWire)));
+
     // Шарики дождя остаются обычными треугольниками и не проходят через тесселяцию.
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     pso.HS = {};
     pso.DS = {};
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -273,7 +291,8 @@ bool LoadScene()
         return false;
     return g_sceneRenderer.Load(
         g_device.Get(), g_queue.Get(), g_cmdAlloc[0].Get(), g_cmdList.Get(),
-        g_srvHeap.Get(), g_srvDescriptorSize, objPath);
+        g_srvHeap.Get(), g_srvDescriptorSize, objPath) &&
+        g_waveWallRenderer.Initialize(g_device.Get());
 }
 
 void DrawScene(const XMMATRIX& viewProj)
@@ -286,6 +305,10 @@ void DrawScene(const XMMATRIX& viewProj)
     g_sceneRenderer.Draw(
         g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), pipeline,
         viewProj, g_camPos, g_appTime, g_tessellationEnabled);
+    g_waveWallRenderer.Draw(
+        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(),
+        g_wireframeEnabled ? g_pipelineWaveWallWire.Get() : g_pipelineWaveWall.Get(),
+        viewProj, g_appTime);
 }
 
 void DrawFrame(float dt)
@@ -440,7 +463,7 @@ void InitD3D(HWND hwnd)
         g_srvHeap.Get(),
         kDeferredSrvBase,
         g_srvDescriptorSize,
-        AppPaths::DeferredShaderFile().c_str());
+        AppPaths::LightingShaderFile().c_str());
     if (!LoadScene())
     {
         MessageBoxW(
