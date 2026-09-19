@@ -67,6 +67,13 @@ bool SceneRenderer::Load(
     if (!Obj::LoadObj(objPath, m_mesh, error) || m_mesh.vertices.empty() || m_mesh.indices.empty())
         return false;
 
+    // Remove the imported photographic backdrop before any GPU buffers are built.
+    // It cannot then reach either the colour or the shadow pass.
+    std::erase_if(m_mesh.submeshes, [this](const Obj::Submesh& submesh) {
+        return submesh.materialIndex < m_mesh.materials.size() &&
+            IsBackgroundMaterial(m_mesh.materials[submesh.materialIndex]);
+    });
+
     m_vertexBuffer = D3DHelpers::CreateUploadBuffer(device, m_mesh.vertices.data(), m_mesh.vertices.size() * sizeof(Obj::MeshVertex));
     m_indexBuffer = D3DHelpers::CreateUploadBuffer(device, m_mesh.indices.data(), m_mesh.indices.size() * sizeof(uint32_t));
     m_vertexView = {m_vertexBuffer->GetGPUVirtualAddress(), static_cast<UINT>(m_mesh.vertices.size() * sizeof(Obj::MeshVertex)), sizeof(Obj::MeshVertex)};

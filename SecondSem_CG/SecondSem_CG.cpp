@@ -477,7 +477,7 @@ void DrawFrame(float dt)
     GBuffer& gb = g_renderSys.GBufferTargets();
     gb.TransitionToRenderTargets(g_cmdList.Get());
 
-    const float gbClearRgb[] = {0.06f, 0.07f, 0.10f};
+    const float gbClearRgb[] = {0.0f, 0.0f, 0.0f};
     gb.ClearAndSetAsRenderTarget(g_cmdList.Get(), gbClearRgb);
 
     D3D12_VIEWPORT viewport{};
