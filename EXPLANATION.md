@@ -17,6 +17,10 @@
 | `T` | включить/выключить тесселяцию и displacement |
 | `R` | включить/выключить каркасный режим; видны рёбра патчей |
 | `F` | включить/выключить frustum culling для 2 000 тестовых объектов |
+| `Y` | включить/выключить каскадные тени (CSM) от направленного света |
+| `U` | показать отладочную карту теней вместо итогового освещения |
+| `O` | включить/выключить SSAO — затемнение в углах и местах контакта |
+| `I` | показать отладочную карту ambient occlusion вместо итогового освещения |
 | `Esc` | выход |
 
 Состояние переключателей, число видимых объектов и число проверок выводятся в заголовок окна.
@@ -1160,3 +1164,186 @@ Root signature связана с PSO, но её параметры заполн�
 `SetGraphicsRootDescriptorTable` — таблицу SRV текстур. Это разделение важно:
 PSO определяет *какой* тип ресурсов ждёт pipeline, а root bindings задают
 *какие конкретно* ресурсы используются в данном draw call.
+
+## 28. Добавленное PBR-освещение и IBL
+
+В проект добавлена модель освещения **PBR** (*Physically Based Rendering* —
+физически правдоподобный рендеринг) в варианте *metallic-roughness*. Она не
+пытается буквально симулировать физику света, но использует величины, близкие к
+свойствам реального материала:
+
+- `albedo` — базовый цвет поверхности без теней и бликов;
+- `metallic` — степень металличности: `0` для диэлектрика (дерево, камень),
+  `1` для металла;
+- `roughness` — шероховатость: маленькое значение даёт чёткий блик и
+  отражение, большое — широкое и матовое;
+- `F0` — отражение при взгляде почти перпендикулярно поверхности. Для
+  неметалла принято около `0.04`, у металла оно окрашено цветом материала.
+
+В отличие от прежней модели Blinn–Phong, здесь зеркальная и диффузная части
+согласованы между собой. Когда поверхность становится металлической, её
+диффузное отражение исчезает, а вклад переходит в окрашенное отражение среды.
+
+### Что передаётся через G-buffer
+
+Deferred rendering уже хранит несколько характеристик поверхности. Новое
+упаковочное соглашение не потребовало дополнительных render target:
+
+| Target | `rgb` | `a` |
+| --- | --- | --- |
+| `GAlbedo` | базовый цвет | `metallic` |
+| `GNormal` | мировая нормаль | `roughness` |
+| `GDepth` | глубина | — |
+
+Это записывается в `GeometryPass.hlsl`. Из MTL-файла берутся старые параметры
+`Ks` (сила зеркального отражения) и `Ns` (shininess), затем они переводятся в
+приближённые PBR-параметры. У Sponza нет полноценной metallic-карты, поэтому
+материал считается металлом только при достаточно сильном цветном `Ks`:
+
+```hlsl
+const float specularStrength = HasSpecularTex
+    ? dot(SpecMap.Sample(Samp, uv).rgb * Ks, 1.0f / 3.0f)
+    : dot(Ks, 1.0f / 3.0f);
+const float metallic = saturate((specularStrength - 0.55f) * 2.2f);
+const float roughness = clamp(sqrt(2.0f / (Ns + 2.0f)), 0.06f, 0.95f);
+output.albedo = float4(baseColor, metallic);
+output.normal = float4(normalW, roughness);
+```
+
+Например, при `Ns = 98` получится `roughness ≈ 0.14`: поверхность достаточно
+гладкая и блик узкий. При `Ns = 2` получится около `0.71`: поверхность матовая.
+`clamp` не даёт получить экстремальные значения, на которых формула блика может
+стать нестабильной.
+
+### BRDF GGX для прямого света
+
+**BRDF** (*Bidirectional Reflectance Distribution Function*) — функция,
+которая определяет, какую долю света поверхность отражает из направления
+источника в сторону камеры. В `LightingPass.hlsl` добавлена популярная
+микрофасеточная BRDF Cook–Torrance с тремя множителями:
+
+```hlsl
+float3 F = FresnelSchlick(saturate(dot(halfVector, viewDirection)), f0);
+float D = DistributionGGX(normal, halfVector, roughness);
+float G = GeometrySmith(normal, viewDirection, lightDirection, roughness);
+float3 specular = (D * G * F) /
+    max(4.0f * saturate(dot(normal, viewDirection)) * nDotL, 1e-4f);
+```
+
+- `F` — **Fresnel**: на скользящем угле поверхность отражает сильнее;
+- `D` — **GGX distribution**: насколько много микроскопических граней
+  ориентировано как нужное зеркало; регулируется `roughness`;
+- `G` — **geometry/visibility**: учитывает, что микрограни могут заслонять
+  друг друга.
+
+Эта же функция `EvaluateLight(...)` используется для point light, spot light,
+солнца и светящихся капель дождя. Поэтому новые свойства материала одинаково
+работают со всеми прямыми источниками, а не только со светом окружения.
+
+### IBL: свет и отражения от окружения
+
+Добавлено **IBL** (*Image-Based Lighting*): окружение хранится не просто как
+картинка фона, а как источник рассеянного света и отражений. Для этого лежат в
+`assets/ibl` три заранее подготовленных DDS-текстуры:
+
+| Файл | Тип | Для чего нужен |
+| --- | --- | --- |
+| `IrradianceMap_BC6U.dds` | cube map | мягкий рассеянный свет среды |
+| `PreFilteredEnvMap_BC6U.dds` | cube map с mip-уровнями | размытые отражения; чем больше `roughness`, тем более грубый mip выбирается |
+| `IntegrationMap.dds` | 2D LUT | готовая часть интеграла BRDF для быстрого расчёта блика |
+
+Cube map состоит из шести граней куба и позволяет читать цвет по направлению,
+например `normal` или `reflection`. LUT (*look-up table*) — обычная текстура,
+в которой заранее сохранён результат дорогой математической операции.
+
+Финальная непрямая составляющая в lighting pass выглядит так:
+
+```hlsl
+float3 irradiance = IrradianceMap.Sample(GSamp, normal).rgb;
+float3 diffuseIbl = irradiance * albedo;
+float3 reflection = reflect(-viewDirection, normal);
+float3 prefiltered = PreFilteredEnvMap.SampleLevel(
+    GSamp, reflection, roughness * 11.0f).rgb;
+float2 brdf = IntegrationMap.Sample(GSamp, float2(nDotV, roughness)).rg;
+float3 specularIbl = prefiltered * (F * brdf.x + brdf.y);
+float3 color = (kD * diffuseIbl + specularIbl) * ao;
+```
+
+Здесь `normal` выбирает, какое окружение освещает матовую поверхность, а
+`reflection` — направление зеркального отражения. `SampleLevel` вручную
+выбирает mip: `roughness * 11.0f` берёт всё более размытые уровни для шершавого
+материала. `ao` применяется только к непрямому IBL-свету, поэтому SSAO не
+делает прямые источники неправдоподобно тёмными в углах.
+
+### Загрузка DDS и привязка ресурсов к GPU
+
+В `TextureUtil` добавлена `CreateTextureFromDds(...)`. Она проверяет DDS/DX10
+заголовок, поддерживает BC6H (HDR-сжатие для cube map) и `R32G32_FLOAT` (LUT),
+копирует все грани и mip-уровни в upload buffer, после чего переводит ресурс в
+состояние `D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE`. Содержимое не
+декодируется в RAM: сжатый BC6H остаётся в виде, понятном GPU.
+
+`RenderingSystem::LoadIbl(...)` вызывает этот загрузчик три раза и размещает
+SRV подряд после G-buffer, в регистрах `t8`, `t9`, `t10`:
+
+```cpp
+Tex::CreateTextureFromDds(..., L"IrradianceMap_BC6U.dds", true, irradiance, ...);
+Tex::CreateTextureFromDds(..., L"PreFilteredEnvMap_BC6U.dds", true, prefiltered, ...);
+Tex::CreateTextureFromDds(..., L"IntegrationMap.dds", false, integration, ...);
+```
+
+`true` означает, что ожидается cube map; для двумерного BRDF LUT передаётся
+`false`. В root signature диапазон SRV увеличен с 8 до 11 дескрипторов, чтобы
+шейдер мог видеть старые G-buffer/CSM/SSAO ресурсы и три новых IBL-ресурса в
+одной descriptor table. В `LoadScene()` IBL загружается до первого кадра:
+
+```cpp
+g_renderSys.LoadIbl(...,
+    AppPaths::ExecutableDirectory() + L"\\assets\\ibl")
+```
+
+Post-build шаг Visual Studio копирует папку `assets` рядом с `.exe`, поэтому
+запуск из `Debug` или `Release` использует те же карты окружения без ручного
+копирования файлов.
+
+## 29. Все переключатели и отладочные режимы
+
+Кнопки реализованы в `WndProc` при получении `WM_KEYDOWN`. Каждая буква меняет
+свой булев флаг и сразу обновляет заголовок окна. Условие
+`(lp & (1ll << 30)) == 0` отбрасывает повторные `WM_KEYDOWN`, которые Windows
+присылает при удержании клавиши: один физический клик — одно переключение.
+
+```cpp
+else if (wp == 'O' && (lp & (1ll << 30)) == 0)
+{
+    g_ssaoEnabled = !g_ssaoEnabled;
+    UpdateWindowTitle();
+}
+```
+
+| Клавиша | Переключаемый флаг | Что меняется в кадре | Как проверить |
+| --- | --- | --- | --- |
+| `T` | `g_tessellationEnabled` | выбирается PSO с Hull/Domain Shader; Sponza делится на более мелкие треугольники и получает displacement | включить `R`: около камеры видно больше рёбер |
+| `R` | `g_wireframeEnabled` | выбирается вариант PSO с `D3D12_FILL_MODE_WIREFRAME` | вместо залитых полигонов виден каркас |
+| `F` | `g_frustumCullingEnabled` | тестовые сферы либо выбираются octree+frustum, либо рисуются все | в заголовке меняются `objects` и `tests` |
+| `Y` | `g_shadowsEnabled` | создаётся/применяется вклад CSM-теней от солнца либо он заменяется на 1.0 | отключить: тени от направленного света исчезают |
+| `U` | `g_shadowDebugView` | lighting pixel shader возвращает серую величину `rawShadow` вместо цвета сцены | видно карту освещённости/тени, где белое — свет, тёмное — тень |
+| `O` | `g_ssaoEnabled` | непрямой свет умножается на ambient occlusion или используется `ao = 1` | отключить: углы и контакты становятся светлее |
+| `I` | `g_ssaoDebugView` | lighting pixel shader выводит `rawAo` как оттенки серого | белое означает открытую область, тёмное — близкую геометрию |
+
+`Y`, `U`, `O` и `I` не пересоздают текстуры или PSO. Их значения записываются
+в frame constant buffer перед lighting pass:
+
+```cpp
+g_renderSys.UploadFrameConstants(
+    g_camPos, camForward, viewProj, g_width, g_height, dt,
+    cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView,
+    g_ssaoEnabled, g_ssaoDebugView);
+```
+
+Это лёгкое переключение: CPU обновляет несколько байтов constant buffer, а
+pixel shader выбирает ветвь. Например, режим `I` использует проверку
+`InvScreen_pad.w > 0.5f`, сразу возвращающую `rawAo`; режим `U` аналогично
+возвращает `rawShadow`. Поэтому отладочные изображения полезны для защиты:
+они показывают не «похожий эффект», а фактические промежуточные результаты
+алгоритмов.

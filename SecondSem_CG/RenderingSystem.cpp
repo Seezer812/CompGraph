@@ -1,5 +1,6 @@
 #include "RenderingSystem.h"
 #include "D3DHelpers.h"
+#include "TextureUtil.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -192,7 +193,7 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
 {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 8; // G-buffer, four CSM maps and SSAO result (t7).
+    range.NumDescriptors = 11; // G-buffer, CSM, SSAO and three IBL maps.
     range.BaseShaderRegister = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -273,6 +274,7 @@ void RenderingSystem::Init(
     const wchar_t* deferredHlslPath)
 {
     m_gbufferSrvBase = gbufferSrvStartIndex;
+    m_iblSrvBase = gbufferSrvStartIndex + 8;
     m_srvDescriptorIncrement = srvDescriptorIncrement;
 
     m_gbuffer.Init(device, width, height);
@@ -376,6 +378,30 @@ void RenderingSystem::UploadFrameConstants(
             cb->rainTileLightIndices[index / 4][index % 4] = kStaticLightCount + i;
         }
     }
+}
+
+bool RenderingSystem::LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
+    ID3D12CommandAllocator* uploadAllocator, ID3D12GraphicsCommandList* uploadCommands,
+    ID3D12DescriptorHeap* srvHeap, const std::filesystem::path& assetDirectory)
+{
+    m_iblTextures.clear(); m_iblUploads.clear();
+    if (FAILED(uploadAllocator->Reset()) || FAILED(uploadCommands->Reset(uploadAllocator, nullptr))) return false;
+    std::wstring error; ComPtr<ID3D12Resource> irradiance, prefiltered, integration;
+    if (!Tex::CreateTextureFromDds(device, uploadCommands, srvHeap, m_iblSrvBase, m_srvDescriptorIncrement,
+            assetDirectory / L"IrradianceMap_BC6U.dds", true, irradiance, m_iblUploads, error) ||
+        !Tex::CreateTextureFromDds(device, uploadCommands, srvHeap, m_iblSrvBase + 1, m_srvDescriptorIncrement,
+            assetDirectory / L"PreFilteredEnvMap_BC6U.dds", true, prefiltered, m_iblUploads, error) ||
+        !Tex::CreateTextureFromDds(device, uploadCommands, srvHeap, m_iblSrvBase + 2, m_srvDescriptorIncrement,
+            assetDirectory / L"IntegrationMap.dds", false, integration, m_iblUploads, error)) {
+        MessageBoxW(nullptr, error.c_str(), L"IBL asset load", MB_OK | MB_ICONERROR); return false;
+    }
+    if (FAILED(uploadCommands->Close())) return false;
+    ID3D12CommandList* lists[] = {uploadCommands}; queue->ExecuteCommandLists(1, lists);
+    ComPtr<ID3D12Fence> fence; if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return false;
+    HANDLE eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr); if (!eventHandle) return false;
+    queue->Signal(fence.Get(), 1); fence->SetEventOnCompletion(1, eventHandle); WaitForSingleObject(eventHandle, INFINITE); CloseHandle(eventHandle);
+    m_iblTextures = {irradiance, prefiltered, integration};
+    return true;
 }
 
 void RenderingSystem::CreateSsaoPipeline(ID3D12Device* device, const wchar_t* hlslPath)

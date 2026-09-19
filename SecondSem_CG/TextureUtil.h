@@ -36,6 +36,20 @@ bool CreateTexture2DFromFile(
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& uploadKeep,
     std::wstring& error);
 
+// Minimal DDS/DX10 loader for the supplied IBL assets.  It preserves compressed
+// BC6H data and all cubemap mip levels instead of converting HDR data through WIC.
+bool CreateTextureFromDds(
+    ID3D12Device* device,
+    ID3D12GraphicsCommandList* cmdList,
+    ID3D12DescriptorHeap* srvHeap,
+    UINT heapIndex,
+    UINT descriptorIncrement,
+    const std::filesystem::path& filePath,
+    bool expectCube,
+    Microsoft::WRL::ComPtr<ID3D12Resource>& outTexture,
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& uploadKeep,
+    std::wstring& error);
+
 // Запись SRV для уже созданной текстуры R8G8B8A_UNORM (повторное использование ресурса в другом слоте кучи).
 void WriteTexture2DSrv(
     ID3D12Device* device,

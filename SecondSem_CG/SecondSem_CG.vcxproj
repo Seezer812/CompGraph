@@ -90,7 +90,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -110,7 +110,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -128,7 +128,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -148,7 +148,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>

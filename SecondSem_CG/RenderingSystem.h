@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <vector>
 #include <array>
+#include <filesystem>
 
 #include <d3d12.h>
 #include <DirectXMath.h>
@@ -59,6 +60,10 @@ public:
         UINT screenW,
         UINT screenH);
 
+    bool LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
+        ID3D12CommandAllocator* uploadAllocator, ID3D12GraphicsCommandList* uploadCommands,
+        ID3D12DescriptorHeap* srvHeap, const std::filesystem::path& assetDirectory);
+
     GBuffer& GBufferTargets() { return m_gbuffer; }
     const std::vector<RainLight>& RainLights() const { return m_rainLights; }
 
@@ -86,6 +91,9 @@ private:
     D3D12_RESOURCE_STATES m_ssaoState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
     UINT m_gbufferSrvBase = 0;
+    UINT m_iblSrvBase = 0;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_iblTextures;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_iblUploads;
     UINT m_srvDescriptorIncrement = 0;
     std::vector<RainLight> m_rainLights;
     float m_rainSpawnRemainder = 0.0f;

@@ -44,6 +44,14 @@ bool IsTessellatedMaterial(const std::string& name)
         name == "column_a" || name == "column_b" || name == "column_c" || name == "details" ||
         name == "roof" || name == "thorn";
 }
+
+bool IsBackgroundMaterial(const Obj::Material& material)
+{
+    // These three broad, non-architectural meshes in the source asset form its
+    // photographed exterior backdrop. They are not part of the Sponza building.
+    return material.name == "Material__25" || material.name == "Material__298" ||
+        material.name == "Material__47";
+}
 } // namespace
 
 bool SceneRenderer::Load(
@@ -150,7 +158,7 @@ void SceneRenderer::Draw(ID3D12GraphicsCommandList* commandList, ID3D12Descripto
     FrameConstants frame{}; XMStoreFloat4x4(&frame.world, XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI)); XMStoreFloat4x4(&frame.viewProjection, viewProjection); frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z); frame.uvAnimation = XMFLOAT4(.035f, .022f, tessellationEnabled ? 1.f : 0.f, 0.f); std::memcpy(m_frameConstantsMapped, &frame, sizeof(frame));
     ID3D12DescriptorHeap* heaps[] = {srvHeap}; commandList->SetDescriptorHeaps(1, heaps); commandList->SetGraphicsRootSignature(rootSignature); commandList->SetPipelineState(pipelineState); commandList->SetGraphicsRootConstantBufferView(0, m_frameConstants->GetGPUVirtualAddress()); commandList->IASetPrimitiveTopology(tessellationEnabled ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); commandList->IASetVertexBuffers(0, 1, &m_vertexView); commandList->IASetIndexBuffer(&m_indexView);
     const auto base = srvHeap->GetGPUDescriptorHandleForHeapStart();
-    for (const auto& submesh : m_mesh.submeshes) { if (submesh.materialIndex >= m_materialSrvBase.size()) continue; auto table = base; table.ptr += static_cast<SIZE_T>(m_materialSrvBase[submesh.materialIndex]) * m_srvDescriptorSize; commandList->SetGraphicsRootConstantBufferView(1, m_materialConstants->GetGPUVirtualAddress() + static_cast<UINT64>(submesh.materialIndex) * kCbAlignment); commandList->SetGraphicsRootDescriptorTable(2, table); commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0); }
+    for (const auto& submesh : m_mesh.submeshes) { if (submesh.materialIndex >= m_materialSrvBase.size() || IsBackgroundMaterial(m_mesh.materials[submesh.materialIndex])) continue; auto table = base; table.ptr += static_cast<SIZE_T>(m_materialSrvBase[submesh.materialIndex]) * m_srvDescriptorSize; commandList->SetGraphicsRootConstantBufferView(1, m_materialConstants->GetGPUVirtualAddress() + static_cast<UINT64>(submesh.materialIndex) * kCbAlignment); commandList->SetGraphicsRootDescriptorTable(2, table); commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0); }
 }
 
 void SceneRenderer::DrawShadow(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState, const XMMATRIX& lightViewProjection, UINT cascade) const
@@ -168,5 +176,9 @@ void SceneRenderer::DrawShadow(ID3D12GraphicsCommandList* commandList, ID3D12Roo
     commandList->IASetVertexBuffers(0, 1, &m_vertexView);
     commandList->IASetIndexBuffer(&m_indexView);
     for (const auto& submesh : m_mesh.submeshes)
+    {
+        if (submesh.materialIndex < m_mesh.materials.size() && IsBackgroundMaterial(m_mesh.materials[submesh.materialIndex]))
+            continue;
         commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0);
+    }
 }

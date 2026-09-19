@@ -125,7 +125,15 @@ GeoRtOut GeometryPS(GeoVsOut input)
     if (UseUvAnim)
         uv += UvAnimAndPad.xy * TimeCamPos.x;
 
-    output.albedo = float4(Albedo.Sample(Samp, uv).rgb * Kd.rgb, 1.0f);
+    const float3 baseColor = Albedo.Sample(Samp, uv).rgb * Kd.rgb;
+    // OBJ/MTL is a specular-gloss workflow.  Convert its shininess to the
+    // perceptually linear roughness needed by the metallic-roughness BRDF.
+    // Sponza has no reliable metalness map, so coloured, very strong specular
+    // materials are the only ones treated as metals.
+    const float specularStrength = HasSpecularTex ? dot(SpecMap.Sample(Samp, uv).rgb * Ks, 1.0f / 3.0f) : dot(Ks, 1.0f / 3.0f);
+    const float metallic = saturate((specularStrength - 0.55f) * 2.2f);
+    const float roughness = clamp(sqrt(2.0f / (Ns + 2.0f)), 0.06f, 0.95f);
+    output.albedo = float4(baseColor, metallic);
     float3 normalW = normalize(input.nrmW);
     if (HasNormalMap)
     {
@@ -134,7 +142,7 @@ GeoRtOut GeometryPS(GeoVsOut input)
         float3 normalT = NormalMap.Sample(Samp, uv).xyz * 2.0f - 1.0f;
         normalW = normalize(tangent * normalT.x + bitangent * normalT.y + normalW * normalT.z);
     }
-    output.normal = float4(normalW, IsEmissive);
+    output.normal = float4(normalW, roughness);
     output.depth = input.clipPos.z / input.clipPos.w;
     return output;
 }

@@ -322,6 +322,8 @@ bool LoadScene()
     return g_sceneRenderer.Load(
         g_device.Get(), g_queue.Get(), g_cmdAlloc[0].Get(), g_cmdList.Get(),
         g_srvHeap.Get(), g_srvDescriptorSize, objPath) &&
+        g_renderSys.LoadIbl(g_device.Get(), g_queue.Get(), g_cmdAlloc[0].Get(), g_cmdList.Get(),
+            g_srvHeap.Get(), AppPaths::ExecutableDirectory() + L"\\assets\\ibl") &&
         g_waveWallRenderer.Initialize(g_device.Get());
 }
 

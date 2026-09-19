@@ -5,6 +5,9 @@ Texture2D GNormal : register(t1);
 Texture2D GDepth : register(t2);
 Texture2D ShadowMaps[4] : register(t3);
 Texture2D AmbientOcclusion : register(t7);
+TextureCube IrradianceMap : register(t8);
+TextureCube PreFilteredEnvMap : register(t9);
+Texture2D IntegrationMap : register(t10);
 SamplerState GSamp : register(s0);
 SamplerComparisonState ShadowSamp : register(s1);
 
@@ -136,7 +139,38 @@ float4 SsaoPS(FsOut input) : SV_Target0
     return float4(saturate(accessibility).xxx, 1.0f);
 }
 
-float3 EvaluateLight(GpuLight light, float3 albedo, float3 normal, float3 position, float3 viewDirection)
+static const float PI = 3.14159265359f;
+
+float DistributionGGX(float3 n, float3 h, float roughness)
+{
+    float a = roughness * roughness, a2 = a * a;
+    float nDotH = saturate(dot(n, h));
+    float denom = nDotH * nDotH * (a2 - 1.0f) + 1.0f;
+    return a2 / max(PI * denom * denom, 1e-5f);
+}
+
+float GeometrySchlickGGX(float nDotX, float roughness)
+{
+    float r = roughness + 1.0f, k = (r * r) / 8.0f;
+    return nDotX / max(nDotX * (1.0f - k) + k, 1e-5f);
+}
+
+float GeometrySmith(float3 n, float3 v, float3 l, float roughness)
+{
+    return GeometrySchlickGGX(saturate(dot(n, v)), roughness) * GeometrySchlickGGX(saturate(dot(n, l)), roughness);
+}
+
+float3 FresnelSchlick(float cosTheta, float3 f0)
+{
+    return f0 + (1.0f - f0) * pow(1.0f - saturate(cosTheta), 5.0f);
+}
+
+float3 FresnelSchlickRoughness(float cosTheta, float3 f0, float roughness)
+{
+    return f0 + (max(1.0f - roughness, f0) - f0) * pow(1.0f - saturate(cosTheta), 5.0f);
+}
+
+float3 EvaluateLight(GpuLight light, float3 albedo, float metallic, float roughness, float3 normal, float3 position, float3 viewDirection)
 {
     float3 lightDirection;
     float attenuation = 1.0f;
@@ -157,18 +191,28 @@ float3 EvaluateLight(GpuLight light, float3 albedo, float3 normal, float3 positi
             attenuation *= spot * spot;
         }
     }
-    float diffuse = saturate(dot(normal, lightDirection));
-    float specular = pow(saturate(dot(normal, normalize(lightDirection + viewDirection))), 48.0f) * 0.28f;
-    return (albedo * diffuse + specular) * light.color_intensity.xyz * light.color_intensity.w * attenuation;
+    float3 halfVector = normalize(lightDirection + viewDirection);
+    float nDotL = saturate(dot(normal, lightDirection));
+    if (nDotL <= 0.0f) return 0.0f;
+    float3 f0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+    float3 F = FresnelSchlick(saturate(dot(halfVector, viewDirection)), f0);
+    float D = DistributionGGX(normal, halfVector, roughness);
+    float G = GeometrySmith(normal, viewDirection, lightDirection, roughness);
+    float3 specular = (D * G * F) / max(4.0f * saturate(dot(normal, viewDirection)) * nDotL, 1e-4f);
+    float3 kD = (1.0f - F) * (1.0f - metallic);
+    float3 radiance = light.color_intensity.xyz * light.color_intensity.w * attenuation;
+    return (kD * albedo / PI + specular) * radiance * nDotL;
 }
 
 float4 LightingPS(FsOut input) : SV_Target0
 {
-    float3 albedo = GAlbedo.Sample(GSamp, input.uv).rgb;
+    float4 packedAlbedo = GAlbedo.Sample(GSamp, input.uv);
+    float3 albedo = packedAlbedo.rgb;
+    float metallic = packedAlbedo.a;
     float4 packedNormal = GNormal.Sample(GSamp, input.uv);
     float3 normal = packedNormal.xyz;
     if (dot(normal, normal) < 1e-6f)
-        return float4(albedo * (0.035f + packedNormal.w), 1.0f);
+        return float4(albedo, 1.0f);
 
     // SSAO affects only the indirect/ambient term. Direct point, spot and sun
     // lighting remains bright even where a nearby corner blocks skylight.
@@ -178,12 +222,23 @@ float4 LightingPS(FsOut input) : SV_Target0
     if (InvScreen_pad.w > 0.5f)
         return float4(rawAo.xxx, 1.0f);
     const float ao = CameraPos_pad.w > 0.5f ? rawAo : 1.0f;
-    float3 color = albedo * (0.035f + packedNormal.w) * ao;
+    const float roughness = clamp(packedNormal.w, 0.06f, 0.95f);
 
     float depth = GDepth.Sample(GSamp, input.uv).r;
     float3 position = ReconstructWorldPosition(input.uv, depth);
     normal = normalize(normal);
     float3 viewDirection = normalize(CameraPos_pad.xyz - position);
+    float nDotV = saturate(dot(normal, viewDirection));
+    float3 f0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+    float3 F = FresnelSchlickRoughness(nDotV, f0, roughness);
+    float3 kD = (1.0f - F) * (1.0f - metallic);
+    float3 irradiance = IrradianceMap.Sample(GSamp, normal).rgb;
+    float3 diffuseIbl = irradiance * albedo;
+    float3 reflection = reflect(-viewDirection, normal);
+    float3 prefiltered = PreFilteredEnvMap.SampleLevel(GSamp, reflection, roughness * 11.0f).rgb;
+    float2 brdf = IntegrationMap.Sample(GSamp, float2(nDotV, roughness)).rg;
+    float3 specularIbl = prefiltered * (F * brdf.x + brdf.y);
+    float3 color = (kD * diffuseIbl + specularIbl) * ao;
 
     // Cascade is selected by camera-space distance. Splits are nonlinear: most
     // shadow-map precision stays near the viewer.
@@ -193,9 +248,9 @@ float4 LightingPS(FsOut input) : SV_Target0
     float rawShadow = ShadowPcf(cascade, position, normal, sunDirection);
     if (InvScreen_pad.z > 0.5f) return float4(rawShadow.xxx, 1.0f);
     float sunShadow = CameraForward_shadowEnabled.w > 0.5f ? lerp(0.25f, 1.0f, rawShadow) : 1.0f;
-    color += EvaluateLight(Lights[0], albedo, normal, position, viewDirection);
-    color += EvaluateLight(Lights[1], albedo, normal, position, viewDirection);
-    color += EvaluateLight(Lights[2], albedo, normal, position, viewDirection) * sunShadow;
+    color += EvaluateLight(Lights[0], albedo, metallic, roughness, normal, position, viewDirection);
+    color += EvaluateLight(Lights[1], albedo, metallic, roughness, normal, position, viewDirection);
+    color += EvaluateLight(Lights[2], albedo, metallic, roughness, normal, position, viewDirection) * sunShadow;
 
     int centerX = clamp((int)floor((position.x + 6.0f) / 2.0f), 0, 5);
     int centerZ = clamp((int)floor((position.z + 5.0f) / 2.0f), 0, 4);
@@ -209,7 +264,7 @@ float4 LightingPS(FsOut input) : SV_Target0
         [loop] for (uint index = 0; index < count; ++index)
         {
             uint lightIndex = RainTileLightIndices[(tile * 16 + index) / 4][(tile * 16 + index) % 4];
-            color += EvaluateLight(Lights[lightIndex], albedo, normal, position, viewDirection);
+            color += EvaluateLight(Lights[lightIndex], albedo, metallic, roughness, normal, position, viewDirection);
         }
     }
     return float4(color, 1.0f);

@@ -8,6 +8,7 @@
 #include <wincodec.h>
 
 #include <algorithm>
+#include <fstream>
 #include <cstdint>
 #include <cstring>
 #include <cwctype>
@@ -451,6 +452,80 @@ static bool DecodeImageFileToRgba32(
 }
 
 } // namespace
+
+bool CreateTextureFromDds(
+    ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
+    ID3D12DescriptorHeap* srvHeap, UINT heapIndex, UINT descriptorIncrement,
+    const std::filesystem::path& filePath, bool expectCube,
+    ComPtr<ID3D12Resource>& outTexture, std::vector<ComPtr<ID3D12Resource>>& uploadKeep,
+    std::wstring& error)
+{
+    struct DdsHeader { uint32_t size, flags, height, width, pitch, depth, mipCount, reserved1[11];
+        uint32_t pfSize, pfFlags, fourCC, rgbBits, rMask, gMask, bMask, aMask, caps, caps2, caps3, caps4, reserved2; };
+    struct DdsDx10 { DXGI_FORMAT format; D3D12_RESOURCE_DIMENSION dimension; uint32_t miscFlag, arraySize, miscFlags2; };
+    constexpr uint32_t kDds = 0x20534444u, kDx10 = 0x30315844u, kCube = 0x4u;
+    std::ifstream in(filePath, std::ios::binary | std::ios::ate);
+    if (!in) { error = L"DDS file: " + filePath.wstring(); return false; }
+    const size_t size = static_cast<size_t>(in.tellg());
+    std::vector<uint8_t> bytes(size); in.seekg(0); in.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
+    if (size < 4 + sizeof(DdsHeader) + sizeof(DdsDx10) || *reinterpret_cast<const uint32_t*>(bytes.data()) != kDds)
+    { error = L"Invalid DDS header"; return false; }
+    const auto* h = reinterpret_cast<const DdsHeader*>(bytes.data() + 4);
+    if (h->size != 124 || h->fourCC != kDx10) { error = L"DDS requires DX10 header"; return false; }
+    const auto* dx10 = reinterpret_cast<const DdsDx10*>(bytes.data() + 4 + sizeof(DdsHeader));
+    const bool isCube = (dx10->miscFlag & kCube) != 0;
+    if (expectCube != isCube || h->width == 0 || h->height == 0 || dx10->arraySize == 0)
+    { error = L"Unexpected DDS texture type"; return false; }
+    const UINT mipCount = (std::max)(1u, h->mipCount);
+    const UINT arraySize = dx10->arraySize * (isCube ? 6u : 1u);
+    const bool blockCompressed = dx10->format == DXGI_FORMAT_BC6H_UF16 || dx10->format == DXGI_FORMAT_BC6H_SF16;
+    const UINT bytesPerPixel = dx10->format == DXGI_FORMAT_R32G32_FLOAT ? 8u : 0u;
+    if (!blockCompressed && bytesPerPixel == 0) { error = L"Unsupported DDS format"; return false; }
+
+    D3D12_RESOURCE_DESC rd{}; rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = h->width; rd.Height = h->height; rd.DepthOrArraySize = static_cast<UINT16>(arraySize);
+    rd.MipLevels = static_cast<UINT16>(mipCount); rd.Format = dx10->format; rd.SampleDesc.Count = 1;
+    D3D12_HEAP_PROPERTIES defaultHeap{}; defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    if (FAILED(device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &rd,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&outTexture)))) { error = L"DDS GPU resource"; return false; }
+
+    const UINT subresources = mipCount * arraySize;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts(subresources);
+    std::vector<UINT> rows(subresources); std::vector<UINT64> rowSizes(subresources); UINT64 uploadBytes = 0;
+    device->GetCopyableFootprints(&rd, 0, subresources, 0, layouts.data(), rows.data(), rowSizes.data(), &uploadBytes);
+    D3D12_HEAP_PROPERTIES uploadHeap{}; uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC buffer{}; buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; buffer.Width = uploadBytes;
+    buffer.Height = 1; buffer.DepthOrArraySize = 1; buffer.MipLevels = 1; buffer.SampleDesc.Count = 1; buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> upload;
+    if (FAILED(device->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &buffer,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)))) { error = L"DDS upload buffer"; return false; }
+    uint8_t* mapped = nullptr; D3D12_RANGE noRead{0, 0}; upload->Map(0, &noRead, reinterpret_cast<void**>(&mapped));
+    size_t sourceOffset = 4 + sizeof(DdsHeader) + sizeof(DdsDx10);
+    for (UINT array = 0; array < arraySize; ++array) for (UINT mip = 0; mip < mipCount; ++mip) {
+        const UINT sub = array * mipCount + mip; const UINT w = (std::max)(1u, h->width >> mip), ht = (std::max)(1u, h->height >> mip);
+        const UINT srcPitch = blockCompressed ? ((w + 3) / 4) * 16u : w * bytesPerPixel;
+        const UINT srcRows = blockCompressed ? (ht + 3) / 4 : ht;
+        const size_t srcBytes = static_cast<size_t>(srcPitch) * srcRows;
+        if (sourceOffset + srcBytes > bytes.size()) { upload->Unmap(0, nullptr); error = L"Truncated DDS data"; return false; }
+        uint8_t* dstMapped = mapped + layouts[sub].Offset;
+        for (UINT row = 0; row < srcRows; ++row) std::memcpy(dstMapped + row * layouts[sub].Footprint.RowPitch, bytes.data() + sourceOffset + row * srcPitch, srcPitch);
+        sourceOffset += srcBytes;
+        D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = upload.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = layouts[sub];
+        D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = outTexture.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = sub;
+        cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    upload->Unmap(0, nullptr); uploadKeep.push_back(upload);
+    D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition = {outTexture.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    cmdList->ResourceBarrier(1, &barrier);
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{}; srv.Format = dx10->format; srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension = isCube ? D3D12_SRV_DIMENSION_TEXTURECUBE : D3D12_SRV_DIMENSION_TEXTURE2D;
+    if (isCube) srv.TextureCube.MipLevels = mipCount; else srv.Texture2D.MipLevels = mipCount;
+    D3D12_CPU_DESCRIPTOR_HANDLE handle = srvHeap->GetCPUDescriptorHandleForHeapStart(); handle.ptr += static_cast<SIZE_T>(heapIndex) * descriptorIncrement;
+    device->CreateShaderResourceView(outTexture.Get(), &srv, handle);
+    return true;
+}
 
 std::filesystem::path ResolveTexturePathInTexturesFolder(
     const std::filesystem::path& mtlDir,
