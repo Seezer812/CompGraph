@@ -4,6 +4,7 @@ Texture2D GAlbedo : register(t0);
 Texture2D GNormal : register(t1);
 Texture2D GDepth : register(t2);
 Texture2D ShadowMaps[4] : register(t3);
+Texture2D AmbientOcclusion : register(t7);
 SamplerState GSamp : register(s0);
 SamplerComparisonState ShadowSamp : register(s1);
 
@@ -74,6 +75,67 @@ FsOut LightingFullscreenVS(uint vertexId : SV_VertexID)
     return output;
 }
 
+// SSAO is a separate full-screen post-process. It reconstructs world-space
+// positions from the G-buffer and writes one accessibility value per pixel.
+// A deterministic per-pixel rotation avoids visible radial banding without a
+// separate noise texture.
+FsOut SsaoFullscreenVS(uint vertexId : SV_VertexID)
+{
+    return LightingFullscreenVS(vertexId);
+}
+
+float3 ReconstructWorldPosition(float2 uv, float depth)
+{
+    float4 world = mul(float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f, depth, 1.0f), InverseViewProjection);
+    return world.xyz / max(world.w, 1e-6f);
+}
+
+float Hash12(float2 p)
+{
+    float3 p3 = frac(float3(p.xyx) * 0.1031f);
+    p3 += dot(p3, p3.yzx + 33.33f);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+float4 SsaoPS(FsOut input) : SV_Target0
+{
+    float3 normal = GNormal.Sample(GSamp, input.uv).xyz;
+    if (dot(normal, normal) < 1e-6f)
+        return 1.0f;
+
+    const float centerDepth = GDepth.Sample(GSamp, input.uv).r;
+    const float3 center = ReconstructWorldPosition(input.uv, centerDepth);
+    normal = normalize(normal);
+    const float angle = Hash12(input.uv * float2(InvScreen_pad.x > 0 ? 1.0f / InvScreen_pad.x : 1.0f,
+                                                  InvScreen_pad.y > 0 ? 1.0f / InvScreen_pad.y : 1.0f)) * 6.2831853f;
+    const float2 rotation = float2(cos(angle), sin(angle));
+    const float2 texel = InvScreen_pad.xy;
+    const float radiusPixels = 18.0f;
+    const float radiusWorld = 0.75f;
+    float occlusion = 0.0f;
+
+    [unroll] for (int i = 0; i < 12; ++i)
+    {
+        const float a = (6.2831853f * i) / 12.0f;
+        const float2 direction = float2(cos(a) * rotation.x - sin(a) * rotation.y,
+                                        cos(a) * rotation.y + sin(a) * rotation.x);
+        // Alternating rings cover both tiny cracks and larger corners.
+        const float ring = 0.35f + 0.65f * frac(i * 0.6180339f + 0.25f);
+        const float2 sampleUv = input.uv + direction * texel * radiusPixels * ring;
+        const float sampleDepth = GDepth.SampleLevel(GSamp, sampleUv, 0).r;
+        const float3 samplePosition = ReconstructWorldPosition(sampleUv, sampleDepth);
+        const float3 delta = samplePosition - center;
+        const float distanceToSample = length(delta);
+        const float facing = dot(normal, delta / max(distanceToSample, 1e-4f));
+        // Only a nearby surface lying in the outward normal hemisphere can
+        // block ambient light at the current surface point.
+        const float nearby = 1.0f - smoothstep(radiusWorld * 0.45f, radiusWorld, distanceToSample);
+        occlusion += step(0.055f, facing) * nearby;
+    }
+    const float accessibility = 1.0f - (occlusion / 12.0f) * 0.78f;
+    return float4(saturate(accessibility).xxx, 1.0f);
+}
+
 float3 EvaluateLight(GpuLight light, float3 albedo, float3 normal, float3 position, float3 viewDirection)
 {
     float3 lightDirection;
@@ -105,12 +167,21 @@ float4 LightingPS(FsOut input) : SV_Target0
     float3 albedo = GAlbedo.Sample(GSamp, input.uv).rgb;
     float4 packedNormal = GNormal.Sample(GSamp, input.uv);
     float3 normal = packedNormal.xyz;
-    float3 color = albedo * (0.035f + packedNormal.w);
-    if (dot(normal, normal) < 1e-6f) return float4(color, 1.0f);
+    if (dot(normal, normal) < 1e-6f)
+        return float4(albedo * (0.035f + packedNormal.w), 1.0f);
+
+    // SSAO affects only the indirect/ambient term. Direct point, spot and sun
+    // lighting remains bright even where a nearby corner blocks skylight.
+    // Full-screen target coordinates are vertically opposite to the G-buffer
+    // convention used by the existing lighting pass, so compensate here.
+    const float rawAo = AmbientOcclusion.Sample(GSamp, float2(input.uv.x, 1.0f - input.uv.y)).r;
+    if (InvScreen_pad.w > 0.5f)
+        return float4(rawAo.xxx, 1.0f);
+    const float ao = CameraPos_pad.w > 0.5f ? rawAo : 1.0f;
+    float3 color = albedo * (0.035f + packedNormal.w) * ao;
 
     float depth = GDepth.Sample(GSamp, input.uv).r;
-    float4 world = mul(float4(input.uv.x * 2.0f - 1.0f, 1.0f - input.uv.y * 2.0f, depth, 1.0f), InverseViewProjection);
-    float3 position = world.xyz / max(world.w, 1e-6f);
+    float3 position = ReconstructWorldPosition(input.uv, depth);
     normal = normalize(normal);
     float3 viewDirection = normalize(CameraPos_pad.xyz - position);
 

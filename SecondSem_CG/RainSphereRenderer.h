@@ -11,7 +11,6 @@ class RainSphereRenderer
 {
 public:
     HRESULT Initialize(ID3D12Device* device);
-    uint32_t SpatialNodeCount() const { return m_spatialObjects.NodeCount(); }
 
     void Draw(
         ID3D12GraphicsCommandList* commandList,

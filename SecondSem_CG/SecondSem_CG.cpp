@@ -112,6 +112,8 @@ bool g_wireframeEnabled = false;
 bool g_frustumCullingEnabled = true;
 bool g_shadowsEnabled = true;
 bool g_shadowDebugView = false;
+bool g_ssaoEnabled = true;
+bool g_ssaoDebugView = false;
 SpatialCulling::Stats g_cullingStats{};
 
 LARGE_INTEGER g_qpcFreq{};
@@ -173,13 +175,15 @@ void UpdateWindowTitle()
     wchar_t title[320]{};
     swprintf_s(
         title,
-        L"SecondSem CG | Y: CSM shadows %s | U: CSM debug %s | T: tessellation %s | R: edges %s | F: frustum + octree %s | objects: %u/2000, tests: %u obj / %u nodes",
+        L"SecondSem CG | Y: CSM %s | U: CSM map %s | O: SSAO %s | I: AO map %s | T: tessellation %s | R: edges %s | F: frustum + octree %s | objects: %u/2000",
         g_shadowsEnabled ? L"ON" : L"OFF",
         g_shadowDebugView ? L"ON" : L"OFF",
+        g_ssaoEnabled ? L"ON" : L"OFF",
+        g_ssaoDebugView ? L"ON" : L"OFF",
         g_tessellationEnabled ? L"ON" : L"OFF",
         g_wireframeEnabled ? L"ON" : L"OFF",
         g_frustumCullingEnabled ? L"ON" : L"OFF",
-        g_cullingStats.visibleObjects, g_cullingStats.objectTests, g_cullingStats.nodeTests);
+        g_cullingStats.visibleObjects);
     SetWindowTextW(g_hwnd, title);
 }
 
@@ -502,7 +506,10 @@ void DrawFrame(float dt)
 
     XMFLOAT3 camForward{};
     XMStoreFloat3(&camForward, Camera::Forward(g_camYaw, g_camPitch));
-    g_renderSys.UploadFrameConstants(g_camPos, camForward, viewProj, g_width, g_height, dt, cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView);
+    g_renderSys.UploadFrameConstants(
+        g_camPos, camForward, viewProj, g_width, g_height, dt,
+        cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView,
+        g_ssaoEnabled, g_ssaoDebugView);
     g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
 
     D3D12_RESOURCE_BARRIER toPresent =
@@ -650,6 +657,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (wp == 'U' && (lp & (1ll << 30)) == 0)
         {
             g_shadowDebugView = !g_shadowDebugView;
+            UpdateWindowTitle();
+        }
+        else if (wp == 'O' && (lp & (1ll << 30)) == 0)
+        {
+            g_ssaoEnabled = !g_ssaoEnabled;
+            UpdateWindowTitle();
+        }
+        else if (wp == 'I' && (lp & (1ll << 30)) == 0)
+        {
+            g_ssaoDebugView = !g_ssaoDebugView;
             UpdateWindowTitle();
         }
         return 0;

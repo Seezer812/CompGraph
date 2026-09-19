@@ -1,4 +1,5 @@
 #include "RenderingSystem.h"
+#include "D3DHelpers.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -191,7 +192,7 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
 {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 7; // G-buffer (t0..t2) + four CSM depth maps (t3..t6).
+    range.NumDescriptors = 8; // G-buffer, four CSM maps and SSAO result (t7).
     range.BaseShaderRegister = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -279,6 +280,8 @@ void RenderingSystem::Init(
         device, shaderVisibleSrvHeap, gbufferSrvStartIndex, srvDescriptorIncrement);
 
     CreateLightingPipeline(device, deferredHlslPath);
+    CreateSsaoPipeline(device, deferredHlslPath);
+    CreateSsaoTarget(device, width, height, shaderVisibleSrvHeap);
 
     m_lightingCB = CreateUploadCb(device, sizeof(LightingCBGPU));
     D3D12_RANGE rr{0, 0};
@@ -300,6 +303,7 @@ void RenderingSystem::Resize(
     m_gbuffer.Resize(device, width, height);
     m_gbuffer.CreateShaderResourceViews(
         device, shaderVisibleSrvHeap, m_gbufferSrvBase, srvDescriptorIncrement);
+    CreateSsaoTarget(device, width, height, shaderVisibleSrvHeap);
 }
 
 void RenderingSystem::UploadFrameConstants(
@@ -312,15 +316,18 @@ void RenderingSystem::UploadFrameConstants(
     const std::array<XMMATRIX, 4>& cascadeMatrices,
     const std::array<float, 4>& cascadeSplits,
     bool shadowsEnabled,
-    bool shadowDebugView)
+    bool shadowDebugView,
+    bool ssaoEnabled,
+    bool ssaoDebugView)
 {
     UpdateLightRain(deltaTime);
 
     auto* cb = reinterpret_cast<LightingCBGPU*>(m_lightingCBMapped);
-    cb->cameraPos_pad = XMFLOAT4(cameraPos.x, cameraPos.y, cameraPos.z, 0.f);
+    // w components carry post-process controls without changing constant-buffer layout.
+    cb->cameraPos_pad = XMFLOAT4(cameraPos.x, cameraPos.y, cameraPos.z, ssaoEnabled ? 1.0f : 0.0f);
     const float iw = screenW > 0 ? 1.f / static_cast<float>(screenW) : 1.f;
     const float ih = screenH > 0 ? 1.f / static_cast<float>(screenH) : 1.f;
-    cb->invScreen_pad = XMFLOAT4(iw, ih, shadowDebugView ? 1.0f : 0.0f, 0.f);
+    cb->invScreen_pad = XMFLOAT4(iw, ih, shadowDebugView ? 1.0f : 0.0f, ssaoDebugView ? 1.0f : 0.0f);
     XMStoreFloat4x4(&cb->inverseViewProjection, XMMatrixInverse(nullptr, viewProjection));
     cb->cameraForward_shadowEnabled = XMFLOAT4(cameraForward.x, cameraForward.y, cameraForward.z, shadowsEnabled ? 1.0f : 0.0f);
     cb->cascadeSplits = XMFLOAT4(cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3]);
@@ -371,6 +378,146 @@ void RenderingSystem::UploadFrameConstants(
     }
 }
 
+void RenderingSystem::CreateSsaoPipeline(ID3D12Device* device, const wchar_t* hlslPath)
+{
+    D3D12_DESCRIPTOR_RANGE range{};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 3; // G-buffer: albedo is unused, normal and depth are sampled.
+    range.BaseShaderRegister = 0;
+    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER params[2]{};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[0].Descriptor.ShaderRegister = 0;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges = &range;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler.ShaderRegister = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC rs{};
+    rs.NumParameters = _countof(params);
+    rs.pParameters = params;
+    rs.NumStaticSamplers = 1;
+    rs.pStaticSamplers = &sampler;
+    rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> sigBlob, rsErr;
+    HRESULT hr = D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sigBlob, &rsErr);
+    if (FAILED(hr)) std::exit(static_cast<int>(hr));
+    hr = device->CreateRootSignature(0, sigBlob->GetBufferPointer(), sigBlob->GetBufferSize(), IID_PPV_ARGS(&m_rootSigSsao));
+    if (FAILED(hr)) std::exit(static_cast<int>(hr));
+
+    ComPtr<ID3DBlob> vs, ps;
+    RSCompile(hlslPath, "SsaoFullscreenVS", "vs_5_0", vs);
+    RSCompile(hlslPath, "SsaoPS", "ps_5_0", ps);
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
+    pso.pRootSignature = m_rootSigSsao.Get();
+    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.SampleMask = UINT_MAX;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = DXGI_FORMAT_R8_UNORM;
+    pso.SampleDesc.Count = 1;
+    hr = device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_psoSsao));
+    if (FAILED(hr)) std::exit(static_cast<int>(hr));
+}
+
+void RenderingSystem::CreateSsaoTarget(ID3D12Device* device, UINT width, UINT height, ID3D12DescriptorHeap* srvHeap)
+{
+    m_ssaoTarget.Reset();
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = width;
+    desc.Height = height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = desc.Format;
+    clear.Color[0] = 1.0f;
+    HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear, IID_PPV_ARGS(&m_ssaoTarget));
+    if (FAILED(hr)) std::exit(static_cast<int>(hr));
+    m_ssaoState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    if (!m_ssaoRtvHeap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        heapDesc.NumDescriptors = 1;
+        hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_ssaoRtvHeap));
+        if (FAILED(hr)) std::exit(static_cast<int>(hr));
+    }
+    device->CreateRenderTargetView(m_ssaoTarget.Get(), nullptr, m_ssaoRtvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = DXGI_FORMAT_R8_UNORM;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MipLevels = 1;
+    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = srvHeap->GetCPUDescriptorHandleForHeapStart();
+    // 400..402 are G-buffer, 403..406 are CSM depth maps; AO follows them.
+    srvHandle.ptr += static_cast<SIZE_T>(m_gbufferSrvBase + 7) * m_srvDescriptorIncrement;
+    device->CreateShaderResourceView(m_ssaoTarget.Get(), &srv, srvHandle);
+}
+
+void RenderingSystem::DrawSsaoPass(
+    ID3D12GraphicsCommandList* cmd,
+    ID3D12DescriptorHeap* srvHeapShaderVisible,
+    UINT screenW,
+    UINT screenH)
+{
+    D3D12_RESOURCE_BARRIER toRtv = D3DHelpers::Transition(
+        m_ssaoTarget.Get(), m_ssaoState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cmd->ResourceBarrier(1, &toRtv);
+    m_ssaoState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_ssaoRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    const float clear[4] = {1.f, 1.f, 1.f, 1.f};
+    cmd->ClearRenderTargetView(rtv, clear, 0, nullptr);
+    cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+
+    ID3D12DescriptorHeap* heaps[] = {srvHeapShaderVisible};
+    cmd->SetDescriptorHeaps(1, heaps);
+    cmd->SetGraphicsRootSignature(m_rootSigSsao.Get());
+    cmd->SetPipelineState(m_psoSsao.Get());
+    cmd->SetGraphicsRootConstantBufferView(0, m_lightingCB->GetGPUVirtualAddress());
+    D3D12_GPU_DESCRIPTOR_HANDLE table = srvHeapShaderVisible->GetGPUDescriptorHandleForHeapStart();
+    table.ptr += static_cast<SIZE_T>(m_gbufferSrvBase) * static_cast<SIZE_T>(m_srvDescriptorIncrement);
+    cmd->SetGraphicsRootDescriptorTable(1, table);
+
+    D3D12_VIEWPORT vp{};
+    vp.Width = static_cast<float>(screenW);
+    vp.Height = static_cast<float>(screenH);
+    vp.MaxDepth = 1.f;
+    D3D12_RECT scissor{0, 0, static_cast<LONG>(screenW), static_cast<LONG>(screenH)};
+    cmd->RSSetViewports(1, &vp);
+    cmd->RSSetScissorRects(1, &scissor);
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->DrawInstanced(3, 1, 0, 0);
+
+    D3D12_RESOURCE_BARRIER toSrv = D3DHelpers::Transition(
+        m_ssaoTarget.Get(), m_ssaoState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmd->ResourceBarrier(1, &toSrv);
+    m_ssaoState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
+
 void RenderingSystem::DrawLightingPass(
     ID3D12GraphicsCommandList* cmd,
     ID3D12DescriptorHeap* srvHeapShaderVisible,
@@ -378,6 +525,8 @@ void RenderingSystem::DrawLightingPass(
     UINT screenW,
     UINT screenH)
 {
+    DrawSsaoPass(cmd, srvHeapShaderVisible, screenW, screenH);
+
     ID3D12DescriptorHeap* heaps[] = {srvHeapShaderVisible};
     cmd->SetDescriptorHeaps(1, heaps);
 

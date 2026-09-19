@@ -48,7 +48,9 @@ public:
         const std::array<DirectX::XMMATRIX, 4>& cascadeMatrices,
         const std::array<float, 4>& cascadeSplits,
         bool shadowsEnabled,
-        bool shadowDebugView);
+        bool shadowDebugView,
+        bool ssaoEnabled,
+        bool ssaoDebugView);
 
     void DrawLightingPass(
         ID3D12GraphicsCommandList* cmd,
@@ -62,6 +64,9 @@ public:
 
 private:
     void CreateLightingPipeline(ID3D12Device* device, const wchar_t* hlslPath);
+    void CreateSsaoPipeline(ID3D12Device* device, const wchar_t* hlslPath);
+    void CreateSsaoTarget(ID3D12Device* device, UINT width, UINT height, ID3D12DescriptorHeap* srvHeap);
+    void DrawSsaoPass(ID3D12GraphicsCommandList* cmd, ID3D12DescriptorHeap* srvHeapShaderVisible, UINT screenW, UINT screenH);
     void WriteDefaultLights();
     void UpdateLightRain(float deltaTime);
 
@@ -69,8 +74,16 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSigLight;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoLight;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSigSsao;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoSsao;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_lightingCB;
     uint8_t* m_lightingCBMapped = nullptr;
+
+    // Full-screen AO intermediate: sampled by the lighting pass after it has
+    // been filled from the normal/depth buffers in the same frame.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_ssaoTarget;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_ssaoRtvHeap;
+    D3D12_RESOURCE_STATES m_ssaoState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
     UINT m_gbufferSrvBase = 0;
     UINT m_srvDescriptorIncrement = 0;

@@ -107,10 +107,7 @@ void GBuffer::CreateTargets(ID3D12Device* device, UINT width, UINT height)
 
 void GBuffer::Init(ID3D12Device* device, UINT width, UINT height)
 {
-    m_dev = device;
-
     m_rtvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    m_dsvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
     D3D12_DESCRIPTOR_HEAP_DESC rhd{};
     rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -204,14 +201,3 @@ void GBuffer::CreateShaderResourceViews(
     makeSrv(m_depthBuffer.Get(), DXGI_FORMAT_R32_FLOAT);
 }
 
-D3D12_CPU_DESCRIPTOR_HANDLE GBuffer::RtvCpuHandle(size_t index) const
-{
-    D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += static_cast<SIZE_T>(index) * m_rtvInc;
-    return h;
-}
-
-D3D12_CPU_DESCRIPTOR_HANDLE GBuffer::DsvCpuHandle() const
-{
-    return m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
-}

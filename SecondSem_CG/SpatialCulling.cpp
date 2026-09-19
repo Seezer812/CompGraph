@@ -17,8 +17,8 @@ std::vector<uint32_t> SpatialCulling::FindVisible(const XMMATRIX& vp, bool frust
 {
     stats = {}; std::vector<uint32_t> result; result.reserve(m_objects.size());
     if (!frustum) { for (uint32_t i = 0; i < m_objects.size(); ++i) result.push_back(i); stats.visibleObjects = (uint32_t)result.size(); return result; }
-    if (octree && !m_nodes.empty()) Visit(0, vp, result, stats);
-    else for (uint32_t i = 0; i < m_objects.size(); ++i) { ++stats.objectTests; if (!OutsideFrustum(ObjectBounds(m_objects[i]), vp)) result.push_back(i); }
+    if (octree && !m_nodes.empty()) Visit(0, vp, result);
+    else for (uint32_t i = 0; i < m_objects.size(); ++i) { if (!OutsideFrustum(ObjectBounds(m_objects[i]), vp)) result.push_back(i); }
     stats.visibleObjects = (uint32_t)result.size(); return result;
 }
 
@@ -43,7 +43,7 @@ void SpatialCulling::Insert(uint32_t objectIndex,int nodeIndex,uint32_t depth)
     Node& node=m_nodes[nodeIndex]; if(node.children[0]!=-1){const Bounds b=ObjectBounds(m_objects[objectIndex]);for(int child:node.children)if(Contains(m_nodes[child].bounds,b)){Insert(objectIndex,child,depth+1);return;}node.objects.push_back(objectIndex);return;}
     node.objects.push_back(objectIndex);if(node.objects.size()<=kNodeCapacity||depth>=kMaxDepth)return;std::vector<uint32_t> old=std::move(node.objects);node.objects.clear();Split(nodeIndex);for(uint32_t i:old)Insert(i,nodeIndex,depth);
 }
-void SpatialCulling::Visit(int nodeIndex,const XMMATRIX& vp,std::vector<uint32_t>& out,Stats& stats) const
+void SpatialCulling::Visit(int nodeIndex,const XMMATRIX& vp,std::vector<uint32_t>& out) const
 {
-    const Node& node=m_nodes[nodeIndex];++stats.nodeTests;if(OutsideFrustum(node.bounds,vp))return;for(uint32_t i:node.objects){++stats.objectTests;if(!OutsideFrustum(ObjectBounds(m_objects[i]),vp))out.push_back(i);}for(int child:node.children)if(child!=-1)Visit(child,vp,out,stats);
+    const Node& node=m_nodes[nodeIndex];if(OutsideFrustum(node.bounds,vp))return;for(uint32_t i:node.objects){if(!OutsideFrustum(ObjectBounds(m_objects[i]),vp))out.push_back(i);}for(int child:node.children)if(child!=-1)Visit(child,vp,out);
 }
