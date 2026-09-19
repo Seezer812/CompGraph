@@ -23,8 +23,12 @@
 #include "WaveWallRenderer.h"
 #include "RenderingSystem.h"
 #include "SpatialCulling.h"
+#include "ShadowMap.h"
 
 #include <algorithm>
+#include <array>
+#include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cwctype>
@@ -47,6 +51,7 @@ constexpr UINT kClientW = 1280;
 constexpr UINT kClientH = 720;
 constexpr UINT kSrvHeapCount = 512;
 constexpr UINT kDeferredSrvBase = 400;
+constexpr UINT kShadowSrvBase = kDeferredSrvBase + 3;
 HWND g_hwnd = nullptr;
 UINT g_width = kClientW;
 UINT g_height = kClientH;
@@ -74,11 +79,15 @@ ComPtr<ID3D12RootSignature> g_rootSignature;
 ComPtr<ID3D12PipelineState> g_pipelineGeo;
 ComPtr<ID3D12PipelineState> g_pipelineGeoWire;
 ComPtr<ID3D12PipelineState> g_pipelineGeoSimple;
+ComPtr<ID3D12PipelineState> g_pipelineGeoMarker;
 ComPtr<ID3D12PipelineState> g_pipelineGeoSimpleWire;
 ComPtr<ID3D12PipelineState> g_pipelineWaveWall;
 ComPtr<ID3D12PipelineState> g_pipelineWaveWallWire;
+ComPtr<ID3D12RootSignature> g_shadowRootSignature;
+ComPtr<ID3D12PipelineState> g_shadowPipeline;
 
 RenderingSystem g_renderSys;
+ShadowMap g_shadowMap;
 SceneRenderer g_sceneRenderer;
 WaveWallRenderer g_waveWallRenderer;
 
@@ -90,8 +99,10 @@ RainSphereRenderer g_rainSphereRenderer;
 UINT g_frameIndex = 0;
 float g_appTime = 0.0f;
 
-XMFLOAT3 g_camPos{0.0f, 1.4f, 4.5f};
-float g_camYaw = 0.0f;
+// Sponza was rotated around X: its interior is toward negative Y, while the
+// floor is at y ≈ 1.26. The old y=1.4 spawn was consequently below the floor.
+XMFLOAT3 g_camPos{0.0f, -0.5f, 4.5f};
+float g_camYaw = -XM_PIDIV2; // Spawn looking 90 degrees left, toward -X.
 float g_camPitch = -0.12f;
 bool g_camPrevRmb = false;
 // Sponza содержит много треугольников, поэтому тесселяция включается вручную клавишей T.
@@ -99,6 +110,8 @@ bool g_camPrevRmb = false;
 bool g_tessellationEnabled = false;
 bool g_wireframeEnabled = false;
 bool g_frustumCullingEnabled = true;
+bool g_shadowsEnabled = true;
+bool g_shadowDebugView = false;
 SpatialCulling::Stats g_cullingStats{};
 
 LARGE_INTEGER g_qpcFreq{};
@@ -160,7 +173,9 @@ void UpdateWindowTitle()
     wchar_t title[320]{};
     swprintf_s(
         title,
-        L"SecondSem CG | T: tessellation %s | R: edges %s | F: frustum + octree %s | objects: %u/2000, tests: %u obj / %u nodes",
+        L"SecondSem CG | Y: CSM shadows %s | U: CSM debug %s | T: tessellation %s | R: edges %s | F: frustum + octree %s | objects: %u/2000, tests: %u obj / %u nodes",
+        g_shadowsEnabled ? L"ON" : L"OFF",
+        g_shadowDebugView ? L"ON" : L"OFF",
         g_tessellationEnabled ? L"ON" : L"OFF",
         g_wireframeEnabled ? L"ON" : L"OFF",
         g_frustumCullingEnabled ? L"ON" : L"OFF",
@@ -285,6 +300,12 @@ void CreateGeometryPipeline()
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoSimple)));
 
+    // The demonstration cubes use hand-authored faces; render both sides so
+    // they remain unmistakably visible regardless of their winding.
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoMarker)));
+
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoSimpleWire)));
 }
@@ -316,6 +337,99 @@ void DrawScene(const XMMATRIX& viewProj)
         viewProj, g_appTime);
 }
 
+void CreateShadowPipeline()
+{
+    D3D12_ROOT_PARAMETER param{};
+    param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    param.Descriptor.ShaderRegister = 0;
+    param.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    D3D12_ROOT_SIGNATURE_DESC rs{};
+    rs.NumParameters = 1; rs.pParameters = &param;
+    rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> sig, err;
+    ThrowIfFailed(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err));
+    ThrowIfFailed(g_device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&g_shadowRootSignature)));
+    ComPtr<ID3DBlob> vs;
+    D3DHelpers::CompileShader((AppPaths::ExecutableDirectory() + L"\\ShadowPass.hlsl").c_str(), "ShadowVS", "vs_5_0", vs);
+    const D3D12_INPUT_ELEMENT_DESC layout[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}, };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};
+    p.pRootSignature = g_shadowRootSignature.Get(); p.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+    // Only light-facing scene geometry must enter the shadow map. Rendering
+    // both sides in an enclosed Sponza hall makes reverse walls occlude the sun.
+    p.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; p.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    p.RasterizerState.DepthBias = 1000; p.RasterizerState.SlopeScaledDepthBias = 1.5f; p.RasterizerState.DepthClipEnable = TRUE;
+    p.DepthStencilState.DepthEnable = TRUE; p.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL; p.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    p.SampleMask = UINT_MAX; p.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    p.NumRenderTargets = 0; p.DSVFormat = DXGI_FORMAT_D32_FLOAT; p.SampleDesc.Count = 1; p.InputLayout = {layout, _countof(layout)};
+    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&p, IID_PPV_ARGS(&g_shadowPipeline)));
+}
+
+std::array<float, ShadowMap::CascadeCount> CascadeSplits()
+{
+    // Blended logarithmic/linear distribution: dense close to the camera.
+    constexpr float nearZ = 0.1f, farZ = 100.0f, lambda = 0.82f;
+    std::array<float, ShadowMap::CascadeCount> result{};
+    for (UINT i = 1; i <= ShadowMap::CascadeCount; ++i) {
+        const float t = static_cast<float>(i) / ShadowMap::CascadeCount;
+        const float logarithmic = nearZ * powf(farZ / nearZ, t);
+        const float linear = nearZ + (farZ - nearZ) * t;
+        result[i - 1] = lambda * logarithmic + (1.0f - lambda) * linear;
+    }
+    return result;
+}
+
+std::array<XMMATRIX, ShadowMap::CascadeCount> CascadeMatrices(const std::array<float, ShadowMap::CascadeCount>& splits)
+{
+    std::array<XMMATRIX, ShadowMap::CascadeCount> result{};
+    // Must exactly match the directional light in RenderingSystem.cpp.
+    const XMVECTOR lightDir = XMVector3Normalize(XMVectorSet(0.62f, 0.70f, -0.35f, 0));
+    const XMVECTOR eye = XMLoadFloat3(&g_camPos);
+    const XMVECTOR forward = Camera::Forward(g_camYaw, g_camPitch);
+    const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
+    const XMVECTOR right = XMVector3Normalize(XMVector3Cross(worldUp, forward));
+    const XMVECTOR up = XMVector3Normalize(XMVector3Cross(forward, right));
+    const float aspect = static_cast<float>(g_width) / (std::max)(1.0f, static_cast<float>(g_height));
+    constexpr float tanHalfFov = 0.41421356f; // tan(PI / 8), matches Camera::ViewProjection.
+    for (UINT i = 0; i < ShadowMap::CascadeCount; ++i) {
+        const float previous = i == 0 ? 0.1f : splits[i - 1];
+        const float current = splits[i];
+        const float nearHalfH = previous * tanHalfFov, nearHalfW = nearHalfH * aspect;
+        const float farHalfH = current * tanHalfFov, farHalfW = farHalfH * aspect;
+        XMVECTOR corners[8];
+        UINT corner = 0;
+        for (float distance : {previous, current}) {
+            const float halfH = distance == previous ? nearHalfH : farHalfH;
+            const float halfW = distance == previous ? nearHalfW : farHalfW;
+            const XMVECTOR planeCenter = eye + forward * distance;
+            for (int y : {-1, 1})
+                for (int x : {-1, 1})
+                    corners[corner++] = planeCenter + right * (halfW * x) + up * (halfH * y);
+        }
+
+        XMVECTOR center = XMVectorZero();
+        for (const XMVECTOR& point : corners) center += point;
+        center /= 8.0f;
+        const XMVECTOR lightPosition = center - lightDir * 80.0f;
+        const XMMATRIX lightView = XMMatrixLookAtLH(lightPosition, center, worldUp);
+        float minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
+        float maxX = -FLT_MAX, maxY = -FLT_MAX, maxZ = -FLT_MAX;
+        for (const XMVECTOR& point : corners) {
+            const XMVECTOR ls = XMVector3TransformCoord(point, lightView);
+            minX = (std::min)(minX, XMVectorGetX(ls)); maxX = (std::max)(maxX, XMVectorGetX(ls));
+            minY = (std::min)(minY, XMVectorGetY(ls)); maxY = (std::max)(maxY, XMVectorGetY(ls));
+            minZ = (std::min)(minZ, XMVectorGetZ(ls)); maxZ = (std::max)(maxZ, XMVectorGetZ(ls));
+        }
+        constexpr float xyPadding = 3.0f, zPadding = 20.0f;
+        result[i] = lightView * XMMatrixOrthographicOffCenterLH(
+            minX - xyPadding, maxX + xyPadding, minY - xyPadding, maxY + xyPadding,
+            (std::max)(0.1f, minZ - zPadding), maxZ + zPadding);
+    }
+    return result;
+}
+
 void DrawFrame(float dt)
 {
     g_frameIndex = g_swapChain->GetCurrentBackBufferIndex();
@@ -330,12 +444,29 @@ void DrawFrame(float dt)
     Camera::Update(g_hwnd, dt, g_camPos, g_camYaw, g_camPitch, g_camPrevRmb);
     g_appTime += dt;
     const XMMATRIX viewProj = Camera::ViewProjection(g_camPos, g_camYaw, g_camPitch, g_width, g_height);
+    const auto cascadeSplits = CascadeSplits();
+    const auto cascadeMatrices = CascadeMatrices(cascadeSplits);
 
     ThrowIfFailed(g_cmdAlloc[g_frameIndex]->Reset());
     ID3D12PipelineState* initialPipeline = g_tessellationEnabled
         ? (g_wireframeEnabled ? g_pipelineGeoWire.Get() : g_pipelineGeo.Get())
         : (g_wireframeEnabled ? g_pipelineGeoSimpleWire.Get() : g_pipelineGeoSimple.Get());
     ThrowIfFailed(g_cmdList->Reset(g_cmdAlloc[g_frameIndex].Get(), initialPipeline));
+
+    if (g_shadowsEnabled)
+    {
+        g_shadowMap.TransitionToDepthWrite(g_cmdList.Get());
+        D3D12_VIEWPORT shadowViewport{}; shadowViewport.Width = static_cast<float>(ShadowMap::Resolution); shadowViewport.Height = static_cast<float>(ShadowMap::Resolution); shadowViewport.MaxDepth = 1.0f;
+        D3D12_RECT shadowScissor{0, 0, static_cast<LONG>(ShadowMap::Resolution), static_cast<LONG>(ShadowMap::Resolution)};
+        g_cmdList->RSSetViewports(1, &shadowViewport); g_cmdList->RSSetScissorRects(1, &shadowScissor);
+        for (UINT cascade = 0; cascade < ShadowMap::CascadeCount; ++cascade) {
+            const auto dsv = g_shadowMap.Dsv(cascade);
+            g_cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            g_cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+            g_sceneRenderer.DrawShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_shadowPipeline.Get(), cascadeMatrices[cascade], cascade);
+        }
+        g_shadowMap.TransitionToShaderResource(g_cmdList.Get());
+    }
 
     GBuffer& gb = g_renderSys.GBufferTargets();
     gb.TransitionToRenderTargets(g_cmdList.Get());
@@ -371,7 +502,7 @@ void DrawFrame(float dt)
 
     XMFLOAT3 camForward{};
     XMStoreFloat3(&camForward, Camera::Forward(g_camYaw, g_camPitch));
-    g_renderSys.UploadFrameConstants(g_camPos, camForward, viewProj, g_width, g_height, dt);
+    g_renderSys.UploadFrameConstants(g_camPos, camForward, viewProj, g_width, g_height, dt, cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView);
     g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
 
     D3D12_RESOURCE_BARRIER toPresent =
@@ -463,6 +594,7 @@ void InitD3D(HWND hwnd)
     ThrowIfFailed(g_rainSphereRenderer.Initialize(g_device.Get()));
     CreateSrvHeap();
     CreateGeometryPipeline();
+    CreateShadowPipeline();
     g_renderSys.Init(
         g_device.Get(),
         g_width,
@@ -471,6 +603,7 @@ void InitD3D(HWND hwnd)
         kDeferredSrvBase,
         g_srvDescriptorSize,
         AppPaths::LightingShaderFile().c_str());
+    g_shadowMap.Init(g_device.Get(), g_srvHeap.Get(), kShadowSrvBase, g_srvDescriptorSize);
     if (!LoadScene())
     {
         MessageBoxW(
@@ -507,6 +640,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (wp == 'F' && (lp & (1ll << 30)) == 0)
         {
             g_frustumCullingEnabled = !g_frustumCullingEnabled;
+            UpdateWindowTitle();
+        }
+        else if (wp == 'Y' && (lp & (1ll << 30)) == 0)
+        {
+            g_shadowsEnabled = !g_shadowsEnabled;
+            UpdateWindowTitle();
+        }
+        else if (wp == 'U' && (lp & (1ll << 30)) == 0)
+        {
+            g_shadowDebugView = !g_shadowDebugView;
             UpdateWindowTitle();
         }
         return 0;

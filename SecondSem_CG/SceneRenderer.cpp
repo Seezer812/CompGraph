@@ -128,7 +128,9 @@ bool SceneRenderer::Load(
     const UINT materialCount = (std::max)(1u, static_cast<UINT>(m_mesh.materials.size()));
     m_materialConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, materialCount * kCbAlignment);
     m_frameConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, kCbAlignment);
+    m_shadowConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, 4 * kCbAlignment);
     D3D12_RANGE range{0, 0}; m_frameConstants->Map(0, &range, reinterpret_cast<void**>(&m_frameConstantsMapped));
+    m_shadowConstants->Map(0, &range, reinterpret_cast<void**>(&m_shadowConstantsMapped));
     uint8_t* mapped = nullptr; m_materialConstants->Map(0, &range, reinterpret_cast<void**>(&mapped));
     for (UINT i = 0; i < materialCount; ++i) {
         MaterialConstants constants{};
@@ -149,4 +151,22 @@ void SceneRenderer::Draw(ID3D12GraphicsCommandList* commandList, ID3D12Descripto
     ID3D12DescriptorHeap* heaps[] = {srvHeap}; commandList->SetDescriptorHeaps(1, heaps); commandList->SetGraphicsRootSignature(rootSignature); commandList->SetPipelineState(pipelineState); commandList->SetGraphicsRootConstantBufferView(0, m_frameConstants->GetGPUVirtualAddress()); commandList->IASetPrimitiveTopology(tessellationEnabled ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); commandList->IASetVertexBuffers(0, 1, &m_vertexView); commandList->IASetIndexBuffer(&m_indexView);
     const auto base = srvHeap->GetGPUDescriptorHandleForHeapStart();
     for (const auto& submesh : m_mesh.submeshes) { if (submesh.materialIndex >= m_materialSrvBase.size()) continue; auto table = base; table.ptr += static_cast<SIZE_T>(m_materialSrvBase[submesh.materialIndex]) * m_srvDescriptorSize; commandList->SetGraphicsRootConstantBufferView(1, m_materialConstants->GetGPUVirtualAddress() + static_cast<UINT64>(submesh.materialIndex) * kCbAlignment); commandList->SetGraphicsRootDescriptorTable(2, table); commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0); }
+}
+
+void SceneRenderer::DrawShadow(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState, const XMMATRIX& lightViewProjection, UINT cascade) const
+{
+    if (!m_ready) return;
+    struct ShadowConstants { XMFLOAT4X4 world; XMFLOAT4X4 lightViewProjection; } constants{};
+    XMStoreFloat4x4(&constants.world, XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI));
+    XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
+    const UINT shadowSlot = cascade % 4;
+    std::memcpy(m_shadowConstantsMapped + static_cast<size_t>(shadowSlot) * kCbAlignment, &constants, sizeof(constants));
+    commandList->SetGraphicsRootSignature(rootSignature);
+    commandList->SetPipelineState(pipelineState);
+    commandList->SetGraphicsRootConstantBufferView(0, m_shadowConstants->GetGPUVirtualAddress() + static_cast<UINT64>(shadowSlot) * kCbAlignment);
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList->IASetVertexBuffers(0, 1, &m_vertexView);
+    commandList->IASetIndexBuffer(&m_indexView);
+    for (const auto& submesh : m_mesh.submeshes)
+        commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0);
 }

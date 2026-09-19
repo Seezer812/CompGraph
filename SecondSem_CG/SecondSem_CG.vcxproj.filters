@@ -42,6 +42,9 @@
     <ClCompile Include="SpatialCulling.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="ShadowMap.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
     <ClCompile Include="AppPaths.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
@@ -71,6 +74,9 @@
     <ClInclude Include="SpatialCulling.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
+    <ClInclude Include="ShadowMap.h">
+      <Filter>Исходные файлы</Filter>
+    </ClInclude>
     <ClInclude Include="AppPaths.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
@@ -86,6 +92,9 @@
       <Filter>Файлы ресурсов</Filter>
     </None>
     <None Include="LightingPass.hlsl">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
+    <None Include="ShadowPass.hlsl">
       <Filter>Файлы ресурсов</Filter>
     </None>
   </ItemGroup>

@@ -3,7 +3,9 @@
 Texture2D GAlbedo : register(t0);
 Texture2D GNormal : register(t1);
 Texture2D GDepth : register(t2);
+Texture2D ShadowMaps[4] : register(t3);
 SamplerState GSamp : register(s0);
+SamplerComparisonState ShadowSamp : register(s1);
 
 #define LIGHT_DIR 0
 #define LIGHT_POINT 1
@@ -25,12 +27,41 @@ cbuffer LightingCB : register(b0)
     float4 CameraPos_pad;
     float4 InvScreen_pad;
     row_major float4x4 InverseViewProjection;
+    float4 CameraForward_shadowEnabled;
+    float4 CascadeSplits;
+    row_major float4x4 CascadeMatrices[4];
     uint LightCount;
     uint3 padHdr;
     GpuLight Lights[MAX_LIGHTS];
     uint4 RainTileCounts[8];
     uint4 RainTileLightIndices[120];
 };
+
+float SampleCascade(uint cascade, float2 uv, float depth)
+{
+    // Shader Model 5 requires a literal texture-array index at SampleCmp.
+    if (cascade == 0) return ShadowMaps[0].SampleCmpLevelZero(ShadowSamp, uv, depth);
+    if (cascade == 1) return ShadowMaps[1].SampleCmpLevelZero(ShadowSamp, uv, depth);
+    if (cascade == 2) return ShadowMaps[2].SampleCmpLevelZero(ShadowSamp, uv, depth);
+    return ShadowMaps[3].SampleCmpLevelZero(ShadowSamp, uv, depth);
+}
+
+float ShadowPcf(uint cascade, float3 position, float3 normal, float3 lightDirection)
+{
+    float4 lightClip = mul(float4(position, 1.0f), CascadeMatrices[cascade]);
+    float3 uvz = lightClip.xyz / max(lightClip.w, 1e-5f);
+    float2 uv = uvz.xy * float2(0.5f, -0.5f) + 0.5f;
+    if (uvz.z <= 0.0f || uvz.z >= 1.0f || any(uv < 0.0f) || any(uv > 1.0f)) return 1.0f;
+    // The Sponza walls contain very dense coplanar details; a larger slope bias
+    // prevents the surface from shadowing itself (shadow acne).
+    float bias = max(0.0040f * (1.0f - saturate(dot(normal, lightDirection))), 0.0015f);
+    float2 texel = 1.0f / 2048.0f;
+    float visibility = 0.0f;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+        visibility += SampleCascade(cascade, uv + float2(x, y) * texel, uvz.z - bias);
+    return visibility / 9.0f;
+}
 
 struct FsOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 
@@ -83,8 +114,17 @@ float4 LightingPS(FsOut input) : SV_Target0
     normal = normalize(normal);
     float3 viewDirection = normalize(CameraPos_pad.xyz - position);
 
-    [unroll] for (uint i = 0; i < 3; ++i)
-        color += EvaluateLight(Lights[i], albedo, normal, position, viewDirection);
+    // Cascade is selected by camera-space distance. Splits are nonlinear: most
+    // shadow-map precision stays near the viewer.
+    float viewDepth = max(0.0f, dot(position - CameraPos_pad.xyz, CameraForward_shadowEnabled.xyz));
+    uint cascade = viewDepth < CascadeSplits.x ? 0 : viewDepth < CascadeSplits.y ? 1 : viewDepth < CascadeSplits.z ? 2 : 3;
+    float3 sunDirection = normalize(-Lights[2].direction_cosOuter.xyz);
+    float rawShadow = ShadowPcf(cascade, position, normal, sunDirection);
+    if (InvScreen_pad.z > 0.5f) return float4(rawShadow.xxx, 1.0f);
+    float sunShadow = CameraForward_shadowEnabled.w > 0.5f ? lerp(0.25f, 1.0f, rawShadow) : 1.0f;
+    color += EvaluateLight(Lights[0], albedo, normal, position, viewDirection);
+    color += EvaluateLight(Lights[1], albedo, normal, position, viewDirection);
+    color += EvaluateLight(Lights[2], albedo, normal, position, viewDirection) * sunShadow;
 
     int centerX = clamp((int)floor((position.x + 6.0f) / 2.0f), 0, 5);
     int centerZ = clamp((int)floor((position.z + 5.0f) / 2.0f), 0, 4);

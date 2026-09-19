@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <array>
 
 #include <d3d12.h>
 #include <DirectXMath.h>
@@ -43,7 +44,11 @@ public:
         const DirectX::XMMATRIX& viewProjection,
         UINT screenW,
         UINT screenH,
-        float deltaTime);
+        float deltaTime,
+        const std::array<DirectX::XMMATRIX, 4>& cascadeMatrices,
+        const std::array<float, 4>& cascadeSplits,
+        bool shadowsEnabled,
+        bool shadowDebugView);
 
     void DrawLightingPass(
         ID3D12GraphicsCommandList* cmd,

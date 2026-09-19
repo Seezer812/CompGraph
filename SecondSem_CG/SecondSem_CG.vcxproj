@@ -90,7 +90,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -110,7 +110,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -128,7 +128,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -148,7 +148,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)"</Command>
+      <Command>copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -163,6 +163,7 @@
     <ClCompile Include="ScenePaths.cpp" />
     <ClCompile Include="SceneRenderer.cpp" />
     <ClCompile Include="SpatialCulling.cpp" />
+    <ClCompile Include="ShadowMap.cpp" />
     <ClCompile Include="AppPaths.cpp" />
     <ClCompile Include="D3D12Context.cpp" />
     <ClCompile Include="WaveWallRenderer.cpp" />
@@ -171,12 +172,14 @@
     <None Include="Shaders.hlsl" />
     <None Include="GeometryPass.hlsl" />
     <None Include="LightingPass.hlsl" />
+    <None Include="ShadowPass.hlsl" />
     <ClInclude Include="Camera.h" />
     <ClInclude Include="RainSphereRenderer.h" />
     <ClInclude Include="D3DHelpers.h" />
     <ClInclude Include="ScenePaths.h" />
     <ClInclude Include="SceneRenderer.h" />
     <ClInclude Include="SpatialCulling.h" />
+    <ClInclude Include="ShadowMap.h" />
     <ClInclude Include="AppPaths.h" />
     <ClInclude Include="D3D12Context.h" />
     <ClInclude Include="WaveWallRenderer.h" />

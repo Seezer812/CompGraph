@@ -52,6 +52,9 @@ struct LightingCBGPU
     XMFLOAT4 cameraPos_pad{};
     XMFLOAT4 invScreen_pad{};
     XMFLOAT4X4 inverseViewProjection{};
+    XMFLOAT4 cameraForward_shadowEnabled{};
+    XMFLOAT4 cascadeSplits{};
+    XMFLOAT4X4 cascadeMatrices[4]{};
     UINT lightCount = 0;
     UINT padHdr[3]{};
     LightGpu lights[kMaxLights]{};
@@ -60,7 +63,7 @@ struct LightingCBGPU
     UINT rainTileLightIndices[120][4]{};
 };
 
-static_assert(sizeof(LightingCBGPU) == 10352);
+static_assert(sizeof(LightingCBGPU) == 10640);
 
 void RSCompile(const wchar_t* path, const char* entry, const char* target, ComPtr<ID3DBlob>& out)
 {
@@ -118,11 +121,15 @@ void RenderingSystem::WriteDefaultLights()
     cb.lights[1].color_intensity = XMFLOAT4(0.12f, 1.f, 0.82f, 5.5f);
   
 
-    XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(0.35f, 0.82f, 0.45f, 0.f));
+    // Bright oblique overhead projector: its side component makes shadows from
+    // columns readable on the Sponza floor instead of hiding directly beneath them.
+    XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(0.62f, 0.70f, -0.35f, 0.f));
     cb.lights[2].type = LIGHT_DIR;
     XMStoreFloat4(&cb.lights[2].direction_cosOuter, sunDir);
     cb.lights[2].direction_cosOuter.w = 0.f;
-    cb.lights[2].color_intensity = XMFLOAT4(10.f, 0.55f, 1.f, 0.38f);
+    // The directional light is deliberately dominant: otherwise the dense
+    // decorative point-light rain visually masks its own CSM shadows.
+    cb.lights[2].color_intensity = XMFLOAT4(1.0f, 0.93f, 0.80f, 7.0f);
 
     std::memcpy(m_lightingCBMapped, &cb, sizeof(cb));
 }
@@ -184,7 +191,7 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
 {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 3;
+    range.NumDescriptors = 7; // G-buffer (t0..t2) + four CSM depth maps (t3..t6).
     range.BaseShaderRegister = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -206,11 +213,19 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
     samp.ShaderRegister = 0;
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    D3D12_STATIC_SAMPLER_DESC shadowSamp = samp;
+    shadowSamp.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+    shadowSamp.AddressU = shadowSamp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    shadowSamp.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    shadowSamp.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    shadowSamp.ShaderRegister = 1;
+
     D3D12_ROOT_SIGNATURE_DESC rs{};
     rs.NumParameters = 2;
     rs.pParameters = params;
-    rs.NumStaticSamplers = 1;
-    rs.pStaticSamplers = &samp;
+    D3D12_STATIC_SAMPLER_DESC samplers[] = {samp, shadowSamp};
+    rs.NumStaticSamplers = 2;
+    rs.pStaticSamplers = samplers;
     rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> sigBlob, rsErr;
@@ -293,7 +308,11 @@ void RenderingSystem::UploadFrameConstants(
     const XMMATRIX& viewProjection,
     UINT screenW,
     UINT screenH,
-    float deltaTime)
+    float deltaTime,
+    const std::array<XMMATRIX, 4>& cascadeMatrices,
+    const std::array<float, 4>& cascadeSplits,
+    bool shadowsEnabled,
+    bool shadowDebugView)
 {
     UpdateLightRain(deltaTime);
 
@@ -301,8 +320,12 @@ void RenderingSystem::UploadFrameConstants(
     cb->cameraPos_pad = XMFLOAT4(cameraPos.x, cameraPos.y, cameraPos.z, 0.f);
     const float iw = screenW > 0 ? 1.f / static_cast<float>(screenW) : 1.f;
     const float ih = screenH > 0 ? 1.f / static_cast<float>(screenH) : 1.f;
-    cb->invScreen_pad = XMFLOAT4(iw, ih, 0.f, 0.f);
+    cb->invScreen_pad = XMFLOAT4(iw, ih, shadowDebugView ? 1.0f : 0.0f, 0.f);
     XMStoreFloat4x4(&cb->inverseViewProjection, XMMatrixInverse(nullptr, viewProjection));
+    cb->cameraForward_shadowEnabled = XMFLOAT4(cameraForward.x, cameraForward.y, cameraForward.z, shadowsEnabled ? 1.0f : 0.0f);
+    cb->cascadeSplits = XMFLOAT4(cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3]);
+    for (UINT i = 0; i < 4; ++i)
+        XMStoreFloat4x4(&cb->cascadeMatrices[i], cascadeMatrices[i]);
 
     cb->lightCount = kStaticLightCount + static_cast<UINT>(m_rainLights.size());
     // Сетка описывает только текущий кадр: без очистки её счётчики накапливались
@@ -316,11 +339,11 @@ void RenderingSystem::UploadFrameConstants(
     LightGpu& spot = cb->lights[0];
     spot.type = LIGHT_SPOT;
     XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(&spot.position_range), eye);
-    spot.position_range.w = 45.f;
+    spot.position_range.w = 0.f; // Camera flashlight is disabled: it flattened CSM shadows.
     XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(&spot.direction_cosOuter), axis);
     spot.direction_cosOuter.w = cosf(XM_PI / 7.f);
     spot.spotCosInner = cosf(XM_PI / 10.f);
-    spot.color_intensity = XMFLOAT4(1.f, 0.97f, 0.9f, 5.5f);
+    spot.color_intensity = XMFLOAT4(1.f, 0.97f, 0.9f, 0.0f);
 
     for (UINT i = 0; i < m_rainLights.size(); ++i)
     {
@@ -331,7 +354,8 @@ void RenderingSystem::UploadFrameConstants(
         light.position_range = XMFLOAT4(drop.position.x, drop.position.y, drop.position.z, 2.35f);
         // Небольшие различия оттенка делают отдельные "капли" различимыми.
         const float hue = static_cast<float>((i * 37u) % 100u) / 100.0f;
-        light.color_intensity = XMFLOAT4(0.25f + hue * 0.35f, 0.45f + hue * 0.35f, 1.0f, 22.0f);
+        // Decorative rain lights must not overpower the sun and hide its shadows.
+        light.color_intensity = XMFLOAT4(0.25f + hue * 0.35f, 0.45f + hue * 0.35f, 1.0f, 3.0f);
 
         // Экранный пиксель проверяет только источники из своей и соседних ячеек.
         // Поэтому 125 источников не превращаются в 125 вычислений на каждый пиксель.

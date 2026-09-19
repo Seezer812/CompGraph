@@ -34,6 +34,15 @@ public:
         float timeSeconds,
         bool tessellationEnabled) const;
 
+    // Depth-only draw used by every CSM cascade. It intentionally uses the base mesh:
+    // shadow silhouette remains stable even when optional tessellation is disabled.
+    void DrawShadow(
+        ID3D12GraphicsCommandList* commandList,
+        ID3D12RootSignature* rootSignature,
+        ID3D12PipelineState* pipelineState,
+        const DirectX::XMMATRIX& lightViewProjection,
+        UINT cascade) const;
+
     bool IsReady() const { return m_ready; }
 
 private:
@@ -49,5 +58,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_materialConstants;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_frameConstants;
     uint8_t* m_frameConstantsMapped = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowConstants;
+    uint8_t* m_shadowConstantsMapped = nullptr;
     UINT m_srvDescriptorSize = 0;
 };

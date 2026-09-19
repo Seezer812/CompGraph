@@ -3,6 +3,7 @@
 #include "ObjLoader.h"
 
 #include <cstring>
+#include <array>
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -83,13 +84,31 @@ HRESULT RainSphereRenderer::Initialize(ID3D12Device* device)
     HRESULT hr = CreateUploadBuffer(device, vertices, sizeof(vertices), m_vertexBuffer);
     if (FAILED(hr)) return hr;
     if (FAILED(hr = CreateUploadBuffer(device, indices, sizeof(indices), m_indexBuffer))) return hr;
+    // Three fixed cubes serve as clearly visible CSM demonstrators in Sponza.
+    const Obj::MeshVertex cubeVertices[] = {
+        {-1,-1,-1, 0,0,-1, 0,0}, { 1,-1,-1, 0,0,-1, 1,0}, { 1, 1,-1, 0,0,-1, 1,1}, {-1, 1,-1, 0,0,-1, 0,1},
+        {-1,-1, 1, 0,0, 1, 0,0}, { 1,-1, 1, 0,0, 1, 1,0}, { 1, 1, 1, 0,0, 1, 1,1}, {-1, 1, 1, 0,0, 1, 0,1},
+        {-1,-1,-1,-1,0, 0, 0,0}, {-1, 1,-1,-1,0, 0, 1,0}, {-1, 1, 1,-1,0, 0, 1,1}, {-1,-1, 1,-1,0, 0, 0,1},
+        { 1,-1,-1, 1,0, 0, 0,0}, { 1,-1, 1, 1,0, 0, 1,0}, { 1, 1, 1, 1,0, 0, 1,1}, { 1, 1,-1, 1,0, 0, 0,1},
+        {-1,-1,-1, 0,-1,0, 0,0}, {-1,-1, 1, 0,-1,0, 1,0}, { 1,-1, 1, 0,-1,0, 1,1}, { 1,-1,-1, 0,-1,0, 0,1},
+        {-1, 1,-1, 0, 1,0, 0,0}, { 1, 1,-1, 0, 1,0, 1,0}, { 1, 1, 1, 0, 1,0, 1,1}, {-1, 1, 1, 0, 1,0, 0,1},
+    };
+    const uint32_t cubeIndices[] = {0,1,2,0,2,3, 4,6,5,4,7,6, 8,9,10,8,10,11, 12,13,14,12,14,15, 16,17,18,16,18,19, 20,22,21,20,23,22};
+    if (FAILED(hr = CreateUploadBuffer(device, cubeVertices, sizeof(cubeVertices), m_cubeVertexBuffer))) return hr;
+    if (FAILED(hr = CreateUploadBuffer(device, cubeIndices, sizeof(cubeIndices), m_cubeIndexBuffer))) return hr;
     if (FAILED(hr = CreateUploadBuffer(device, nullptr, kMaxSpheres * kCbAlignment, m_frameConstants))) return hr;
+    if (FAILED(hr = CreateUploadBuffer(device, nullptr, 3 * kCbAlignment, m_markerConstants))) return hr;
+    if (FAILED(hr = CreateUploadBuffer(device, nullptr, 4 * 3 * kCbAlignment, m_markerShadowConstants))) return hr;
     if (FAILED(hr = CreateUploadBuffer(device, nullptr, kCbAlignment, m_materialConstants))) return hr;
 
     m_vertexView = {m_vertexBuffer->GetGPUVirtualAddress(), sizeof(vertices), sizeof(Obj::MeshVertex)};
     m_indexView = {m_indexBuffer->GetGPUVirtualAddress(), sizeof(indices), DXGI_FORMAT_R32_UINT};
+    m_cubeVertexView = {m_cubeVertexBuffer->GetGPUVirtualAddress(), sizeof(cubeVertices), sizeof(Obj::MeshVertex)};
+    m_cubeIndexView = {m_cubeIndexBuffer->GetGPUVirtualAddress(), sizeof(cubeIndices), DXGI_FORMAT_R32_UINT};
     D3D12_RANGE readRange{0, 0};
     if (FAILED(hr = m_frameConstants->Map(0, &readRange, reinterpret_cast<void**>(&m_frameConstantsMapped)))) return hr;
+    if (FAILED(hr = m_markerConstants->Map(0, &readRange, reinterpret_cast<void**>(&m_markerConstantsMapped)))) return hr;
+    if (FAILED(hr = m_markerShadowConstants->Map(0, &readRange, reinterpret_cast<void**>(&m_markerShadowConstantsMapped)))) return hr;
     EmissiveMaterialConstants material{};
     void* mapped = nullptr;
     if (FAILED(hr = m_materialConstants->Map(0, &readRange, &mapped))) return hr;
@@ -147,5 +166,70 @@ void RainSphereRenderer::Draw(
             0, m_frameConstants->GetGPUVirtualAddress() + static_cast<UINT64>(constantIndex) * kCbAlignment);
         commandList->DrawIndexedInstanced(24, 1, 0, 0, 0);
         ++constantIndex;
+    }
+}
+
+namespace
+{
+const std::array<XMMATRIX, 3>& ShadowCasterWorlds()
+{
+    // The transformed floor is y = 1.26 and the hall extends toward negative Y.
+    // These cubes rest on it and are in front of the corrected spawn point
+    // after its 90-degree-left rotation (toward -X).
+    static const std::array<XMMATRIX, 3> worlds = {
+        XMMatrixScaling(0.48f, 0.70f, 0.48f) * XMMatrixTranslation(-2.7f, 0.56f, 4.5f),
+        XMMatrixScaling(0.58f, 0.70f, 0.58f) * XMMatrixTranslation(-5.4f, 0.56f, 3.0f),
+        XMMatrixScaling(0.52f, 0.70f, 0.52f) * XMMatrixTranslation(-7.8f, 0.56f, 6.3f),
+    };
+    return worlds;
+}
+}
+
+void RainSphereRenderer::DrawShadowCaster(
+    ID3D12GraphicsCommandList* commandList, ID3D12DescriptorHeap* srvHeap,
+    ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState,
+    const XMMATRIX& viewProjection, float timeSeconds)
+{
+    FrameConstants frame{};
+    ID3D12DescriptorHeap* heaps[] = {srvHeap};
+    commandList->SetDescriptorHeaps(1, heaps);
+    commandList->SetGraphicsRootSignature(rootSignature);
+    commandList->SetPipelineState(pipelineState);
+    commandList->SetGraphicsRootConstantBufferView(1, m_materialConstants->GetGPUVirtualAddress());
+    commandList->SetGraphicsRootDescriptorTable(2, srvHeap->GetGPUDescriptorHandleForHeapStart());
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList->IASetVertexBuffers(0, 1, &m_cubeVertexView);
+    commandList->IASetIndexBuffer(&m_cubeIndexView);
+    UINT markerIndex = 0;
+    for (const XMMATRIX& world : ShadowCasterWorlds()) {
+        XMStoreFloat4x4(&frame.world, world);
+        XMStoreFloat4x4(&frame.viewProjection, viewProjection);
+        frame.timeCamera = XMFLOAT4(timeSeconds, 0, 0, 0);
+        std::memcpy(m_markerConstantsMapped + static_cast<size_t>(markerIndex) * kCbAlignment, &frame, sizeof(frame));
+        commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + static_cast<UINT64>(markerIndex) * kCbAlignment);
+        commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+        ++markerIndex;
+    }
+}
+
+void RainSphereRenderer::DrawShadowCasterDepth(
+    ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* rootSignature,
+    ID3D12PipelineState* pipelineState, const XMMATRIX& lightViewProjection, UINT cascade)
+{
+    struct ShadowConstants { XMFLOAT4X4 world; XMFLOAT4X4 lightViewProjection; } constants{};
+    commandList->SetGraphicsRootSignature(rootSignature);
+    commandList->SetPipelineState(pipelineState);
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList->IASetVertexBuffers(0, 1, &m_cubeVertexView);
+    commandList->IASetIndexBuffer(&m_cubeIndexView);
+    UINT markerIndex = 0;
+    for (const XMMATRIX& world : ShadowCasterWorlds()) {
+        XMStoreFloat4x4(&constants.world, world);
+        XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
+        const UINT shadowSlot = (cascade % 4) * 3 + markerIndex;
+        std::memcpy(m_markerShadowConstantsMapped + static_cast<size_t>(shadowSlot) * kCbAlignment, &constants, sizeof(constants));
+        commandList->SetGraphicsRootConstantBufferView(0, m_markerShadowConstants->GetGPUVirtualAddress() + static_cast<UINT64>(shadowSlot) * kCbAlignment);
+        commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+        ++markerIndex;
     }
 }
