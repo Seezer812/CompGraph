@@ -16,7 +16,7 @@
 #include "Camera.h"
 #include "AppPaths.h"
 #include "D3D12Context.h"
-#include "RainSphereRenderer.h"
+#include "SceneObjectRenderer.h"
 #include "D3DHelpers.h"
 #include "ScenePaths.h"
 #include "SceneRenderer.h"
@@ -24,6 +24,7 @@
 #include "RenderingSystem.h"
 #include "SpatialCulling.h"
 #include "ShadowMap.h"
+#include "PointShadowMap.h"
 
 #include <algorithm>
 #include <array>
@@ -81,20 +82,23 @@ ComPtr<ID3D12PipelineState> g_pipelineGeoWire;
 ComPtr<ID3D12PipelineState> g_pipelineGeoSimple;
 ComPtr<ID3D12PipelineState> g_pipelineGeoMarker;
 ComPtr<ID3D12PipelineState> g_pipelineGeoSimpleWire;
+ComPtr<ID3D12PipelineState> g_pipelineTopCamera;
 ComPtr<ID3D12PipelineState> g_pipelineWaveWall;
 ComPtr<ID3D12PipelineState> g_pipelineWaveWallWire;
 ComPtr<ID3D12RootSignature> g_shadowRootSignature;
 ComPtr<ID3D12PipelineState> g_shadowPipeline;
+ComPtr<ID3D12PipelineState> g_pointShadowPipeline;
 
 RenderingSystem g_renderSys;
 ShadowMap g_shadowMap;
+PointShadowMap g_pointShadowMap;
 SceneRenderer g_sceneRenderer;
 WaveWallRenderer g_waveWallRenderer;
 
 ComPtr<ID3D12DescriptorHeap> g_srvHeap;
 UINT g_srvDescriptorSize = 0;
 
-RainSphereRenderer g_rainSphereRenderer;
+SceneObjectRenderer g_sceneObjectRenderer;
 
 UINT g_frameIndex = 0;
 float g_appTime = 0.0f;
@@ -112,8 +116,9 @@ bool g_wireframeEnabled = false;
 bool g_frustumCullingEnabled = true;
 bool g_shadowsEnabled = true;
 bool g_shadowDebugView = false;
-bool g_ssaoEnabled = true;
-bool g_ssaoDebugView = false;
+bool g_cascadeColorDebug = false;
+bool g_vignetteEnabled = true;
+UINT g_shadowMapDebugIndex = 0;
 SpatialCulling::Stats g_cullingStats{};
 
 LARGE_INTEGER g_qpcFreq{};
@@ -175,11 +180,12 @@ void UpdateWindowTitle()
     wchar_t title[320]{};
     swprintf_s(
         title,
-        L"SecondSem CG | Y: CSM %s | U: CSM map %s | O: SSAO %s | I: AO map %s | T: tessellation %s | R: edges %s | F: frustum + octree %s | objects: %u/2000",
+        L"SecondSem CG | Y: CSM %s | U: CSM result %s | I: cascades %s | 1-4: texture %u | 0: scene | V: vignette %s | T: tessellation %s | R: edges %s | F: culling %s | objects: %u/2000",
         g_shadowsEnabled ? L"ON" : L"OFF",
         g_shadowDebugView ? L"ON" : L"OFF",
-        g_ssaoEnabled ? L"ON" : L"OFF",
-        g_ssaoDebugView ? L"ON" : L"OFF",
+        g_cascadeColorDebug ? L"ON" : L"OFF",
+        g_shadowMapDebugIndex,
+        g_vignetteEnabled ? L"ON" : L"OFF",
         g_tessellationEnabled ? L"ON" : L"OFF",
         g_wireframeEnabled ? L"ON" : L"OFF",
         g_frustumCullingEnabled ? L"ON" : L"OFF",
@@ -296,7 +302,7 @@ void CreateGeometryPipeline()
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineWaveWallWire)));
 
-    // Шарики дождя остаются обычными треугольниками и не проходят через тесселяцию.
+    // Обычная геометрия сцены рисуется треугольниками без тесселяции.
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     pso.HS = {};
@@ -304,14 +310,35 @@ void CreateGeometryPipeline()
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoSimple)));
 
-    // The demonstration cubes use hand-authored faces; render both sides so
-    // they remain unmistakably visible regardless of their winding.
+    // Test objects are rendered from both sides, which avoids losing polygons
+    // because of a mesh winding convention.
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoMarker)));
 
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoSimpleWire)));
+
+    // A separate forward pipeline renders the second, top-down camera straight
+    // to the back buffer after the deferred main image has been composed.
+    ComPtr<ID3DBlob> topCameraPs;
+    D3DHelpers::CompileShader(sp.c_str(), "TopCameraPS", "ps_5_0", topCameraPs);
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC topCameraPso = pso;
+    topCameraPso.PS = {topCameraPs->GetBufferPointer(), topCameraPs->GetBufferSize()};
+    topCameraPso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    topCameraPso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    topCameraPso.DepthStencilState.DepthEnable = TRUE;
+    topCameraPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    topCameraPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    topCameraPso.NumRenderTargets = 1;
+    topCameraPso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    // The G-buffer pipeline has three formats.  A pipeline with one target
+    // must explicitly leave the other entries unknown, otherwise D3D12
+    // rejects the descriptor with E_INVALIDARG.
+    topCameraPso.RTVFormats[1] = DXGI_FORMAT_UNKNOWN;
+    topCameraPso.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
+    topCameraPso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&topCameraPso, IID_PPV_ARGS(&g_pipelineTopCamera)));
 }
 
 bool LoadScene()
@@ -343,20 +370,75 @@ void DrawScene(const XMMATRIX& viewProj)
         viewProj, g_appTime);
 }
 
+XMMATRIX TopCameraViewProjection()
+{
+    // This is a regular perspective camera placed above the culling objects,
+    // not an orthographic minimap.  It looks down at the centre of the scene.
+    const XMVECTOR eye = XMVectorSet(0.0f, -48.0f, 32.0f, 1.0f);
+    const XMVECTOR target = XMVectorZero();
+    // With negative Y as world-up, use Z to orient a camera looking nearly
+    // vertically along Y and avoid a near-parallel up/direction pair.
+    const XMVECTOR worldUp = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    return XMMatrixLookAtLH(eye, target, worldUp) * XMMatrixPerspectiveFovLH(XM_PI / 3.0f, 1.0f, 0.1f, 120.0f);
+}
+
+void DrawTopCamera(D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv, const XMMATRIX& mainViewProjection)
+{
+    constexpr LONG kMargin = 16;
+    const LONG outerSize = static_cast<LONG>((std::min)(280u, (std::min)(g_width, g_height) / 3));
+    if (outerSize < 64)
+        return;
+
+    const D3D12_RECT outerRect{
+        static_cast<LONG>(g_width) - outerSize - kMargin,
+        static_cast<LONG>(g_height) - outerSize - kMargin,
+        static_cast<LONG>(g_width) - kMargin,
+        static_cast<LONG>(g_height) - kMargin};
+    const D3D12_RECT innerRect{outerRect.left + 3, outerRect.top + 3, outerRect.right - 3, outerRect.bottom - 3};
+    const float borderColor[] = {0.85f, 0.90f, 1.0f, 1.0f};
+    const float backgroundColor[] = {0.015f, 0.025f, 0.045f, 1.0f};
+    g_cmdList->ClearRenderTargetView(backBufferRtv, borderColor, 1, &outerRect);
+    g_cmdList->ClearRenderTargetView(backBufferRtv, backgroundColor, 1, &innerRect);
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = g_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    g_cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 1, &innerRect);
+    g_cmdList->OMSetRenderTargets(1, &backBufferRtv, FALSE, &dsv);
+
+    D3D12_VIEWPORT viewport{};
+    viewport.TopLeftX = static_cast<float>(innerRect.left);
+    viewport.TopLeftY = static_cast<float>(innerRect.top);
+    viewport.Width = static_cast<float>(innerRect.right - innerRect.left);
+    viewport.Height = static_cast<float>(innerRect.bottom - innerRect.top);
+    viewport.MaxDepth = 1.0f;
+    g_cmdList->RSSetViewports(1, &viewport);
+    g_cmdList->RSSetScissorRects(1, &innerRect);
+
+    const XMMATRIX topViewProjection = TopCameraViewProjection();
+    const XMFLOAT3 topCameraPosition{0.0f, -48.0f, 32.0f};
+    g_sceneRenderer.Draw(
+        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineTopCamera.Get(),
+        topViewProjection, topCameraPosition, g_appTime, false);
+    g_sceneObjectRenderer.DrawCulledFromTopCamera(
+        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineTopCamera.Get(),
+        topViewProjection, mainViewProjection, g_appTime,
+        g_frustumCullingEnabled, true);
+}
+
 void CreateShadowPipeline()
 {
     D3D12_ROOT_PARAMETER param{};
     param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     param.Descriptor.ShaderRegister = 0;
-    param.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     D3D12_ROOT_SIGNATURE_DESC rs{};
     rs.NumParameters = 1; rs.pParameters = &param;
     rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> sig, err;
     ThrowIfFailed(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err));
     ThrowIfFailed(g_device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&g_shadowRootSignature)));
-    ComPtr<ID3DBlob> vs;
+    ComPtr<ID3DBlob> vs, pointVs, pointPs;
     D3DHelpers::CompileShader((AppPaths::ExecutableDirectory() + L"\\ShadowPass.hlsl").c_str(), "ShadowVS", "vs_5_0", vs);
+    D3DHelpers::CompileShader((AppPaths::ExecutableDirectory() + L"\\ShadowPass.hlsl").c_str(), "PointShadowVS", "vs_5_0", pointVs);
+    D3DHelpers::CompileShader((AppPaths::ExecutableDirectory() + L"\\ShadowPass.hlsl").c_str(), "PointShadowPS", "ps_5_0", pointPs);
     const D3D12_INPUT_ELEMENT_DESC layout[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -371,67 +453,83 @@ void CreateShadowPipeline()
     p.SampleMask = UINT_MAX; p.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     p.NumRenderTargets = 0; p.DSVFormat = DXGI_FORMAT_D32_FLOAT; p.SampleDesc.Count = 1; p.InputLayout = {layout, _countof(layout)};
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&p, IID_PPV_ARGS(&g_shadowPipeline)));
+
+    p.VS = {pointVs->GetBufferPointer(), pointVs->GetBufferSize()};
+    p.PS = {pointPs->GetBufferPointer(), pointPs->GetBufferSize()};
+    p.NumRenderTargets = 1;
+    p.RTVFormats[0] = DXGI_FORMAT_R32_FLOAT;
+    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&p, IID_PPV_ARGS(&g_pointShadowPipeline)));
+}
+
+std::array<XMMATRIX, PointShadowMap::FaceCount> PointShadowMatrices(const XMFLOAT3& position, float range)
+{
+    const XMVECTOR eye = XMLoadFloat3(&position);
+    const XMVECTOR directions[PointShadowMap::FaceCount] = {
+        XMVectorSet(1, 0, 0, 0), XMVectorSet(-1, 0, 0, 0),
+        XMVectorSet(0, 1, 0, 0), XMVectorSet(0, -1, 0, 0),
+        XMVectorSet(0, 0, 1, 0), XMVectorSet(0, 0, -1, 0),
+    };
+    const XMVECTOR ups[PointShadowMap::FaceCount] = {
+        XMVectorSet(0, 1, 0, 0), XMVectorSet(0, 1, 0, 0),
+        XMVectorSet(0, 0, -1, 0), XMVectorSet(0, 0, 1, 0),
+        XMVectorSet(0, 1, 0, 0), XMVectorSet(0, 1, 0, 0),
+    };
+    std::array<XMMATRIX, PointShadowMap::FaceCount> matrices{};
+    const XMMATRIX projection = XMMatrixPerspectiveFovLH(XM_PIDIV2, 1.0f, 0.1f, range);
+    for (UINT face = 0; face < PointShadowMap::FaceCount; ++face)
+        matrices[face] = XMMatrixLookToLH(eye, directions[face], ups[face]) * projection;
+    return matrices;
 }
 
 std::array<float, ShadowMap::CascadeCount> CascadeSplits()
 {
-    // Blended logarithmic/linear distribution: dense close to the camera.
-    constexpr float nearZ = 0.1f, farZ = 100.0f, lambda = 0.82f;
-    std::array<float, ShadowMap::CascadeCount> result{};
-    for (UINT i = 1; i <= ShadowMap::CascadeCount; ++i) {
-        const float t = static_cast<float>(i) / ShadowMap::CascadeCount;
-        const float logarithmic = nearZ * powf(farZ / nearZ, t);
-        const float linear = nearZ + (farZ - nearZ) * t;
-        result[i - 1] = lambda * logarithmic + (1.0f - lambda) * linear;
-    }
-    return result;
+    // Camera visibility extends to 200 units, while CSM only needs to cover
+    // the 40-unit Sponza hall. Four equal 10-unit intervals make each level
+    // visible in the scene instead of placing all geometry in cascade zero.
+    constexpr float shadowDistance = 40.0f;
+    constexpr float step = shadowDistance / static_cast<float>(ShadowMap::CascadeCount);
+    return {step, step * 2.0f, step * 3.0f, shadowDistance};
 }
 
-std::array<XMMATRIX, ShadowMap::CascadeCount> CascadeMatrices(const std::array<float, ShadowMap::CascadeCount>& splits)
+std::array<XMMATRIX, ShadowMap::CascadeCount> CascadeMatrices()
 {
     std::array<XMMATRIX, ShadowMap::CascadeCount> result{};
-    // Must exactly match the directional light in RenderingSystem.cpp.
-    const XMVECTOR lightDir = XMVector3Normalize(XMVectorSet(0.62f, 0.70f, -0.35f, 0));
-    const XMVECTOR eye = XMLoadFloat3(&g_camPos);
-    const XMVECTOR forward = Camera::Forward(g_camYaw, g_camPitch);
+    // Scene-anchored CSM: the light cameras remain fixed in world space.
+    // The main camera selects a resolution level, but cannot make the shadow
+    // projection slide over Sponza while the player moves.
+    const XMVECTOR lightDir = XMVector3Normalize(XMVectorSet(0.18f, 0.96f, -0.22f, 0));
     const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
-    const XMVECTOR right = XMVector3Normalize(XMVector3Cross(worldUp, forward));
-    const XMVECTOR up = XMVector3Normalize(XMVector3Cross(forward, right));
-    const float aspect = static_cast<float>(g_width) / (std::max)(1.0f, static_cast<float>(g_height));
-    constexpr float tanHalfFov = 0.41421356f; // tan(PI / 8), matches Camera::ViewProjection.
-    for (UINT i = 0; i < ShadowMap::CascadeCount; ++i) {
-        const float previous = i == 0 ? 0.1f : splits[i - 1];
-        const float current = splits[i];
-        const float nearHalfH = previous * tanHalfFov, nearHalfW = nearHalfH * aspect;
-        const float farHalfH = current * tanHalfFov, farHalfW = farHalfH * aspect;
-        XMVECTOR corners[8];
-        UINT corner = 0;
-        for (float distance : {previous, current}) {
-            const float halfH = distance == previous ? nearHalfH : farHalfH;
-            const float halfW = distance == previous ? nearHalfW : farHalfW;
-            const XMVECTOR planeCenter = eye + forward * distance;
-            for (int y : {-1, 1})
-                for (int x : {-1, 1})
-                    corners[corner++] = planeCenter + right * (halfW * x) + up * (halfH * y);
-        }
+    const XMVECTOR lightUp = fabsf(XMVectorGetY(lightDir)) > 0.95f
+        ? XMVectorSet(0, 0, 1, 0) : worldUp;
 
-        XMVECTOR center = XMVectorZero();
-        for (const XMVECTOR& point : corners) center += point;
-        center /= 8.0f;
-        const XMVECTOR lightPosition = center - lightDir * 80.0f;
-        const XMMATRIX lightView = XMMatrixLookAtLH(lightPosition, center, worldUp);
-        float minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
-        float maxX = -FLT_MAX, maxY = -FLT_MAX, maxZ = -FLT_MAX;
-        for (const XMVECTOR& point : corners) {
-            const XMVECTOR ls = XMVector3TransformCoord(point, lightView);
-            minX = (std::min)(minX, XMVectorGetX(ls)); maxX = (std::max)(maxX, XMVectorGetX(ls));
-            minY = (std::min)(minY, XMVectorGetY(ls)); maxY = (std::max)(maxY, XMVectorGetY(ls));
-            minZ = (std::min)(minZ, XMVectorGetZ(ls)); maxZ = (std::max)(maxZ, XMVectorGetZ(ls));
-        }
-        constexpr float xyPadding = 3.0f, zPadding = 20.0f;
-        result[i] = lightView * XMMatrixOrthographicOffCenterLH(
-            minX - xyPadding, maxX + xyPadding, minY - xyPadding, maxY + xyPadding,
-            (std::max)(0.1f, minZ - zPadding), maxZ + zPadding);
+    XMFLOAT3 boundsMin{-20.0f, -15.0f, -12.0f};
+    XMFLOAT3 boundsMax{18.0f, 2.0f, 12.0f};
+    g_sceneRenderer.GetShadowCasterBounds(boundsMin, boundsMax);
+    const XMVECTOR centre = XMVectorSet(
+        (boundsMin.x + boundsMax.x) * 0.5f,
+        (boundsMin.y + boundsMax.y) * 0.5f,
+        (boundsMin.z + boundsMax.z) * 0.5f, 1.0f);
+    float sceneRadius = 0.0f;
+    for (int z = 0; z < 2; ++z)
+        for (int y = 0; y < 2; ++y)
+            for (int x = 0; x < 2; ++x)
+            {
+                const XMVECTOR corner = XMVectorSet(
+                    x ? boundsMax.x : boundsMin.x,
+                    y ? boundsMax.y : boundsMin.y,
+                    z ? boundsMax.z : boundsMin.z, 1.0f);
+                sceneRadius = (std::max)(sceneRadius, XMVectorGetX(XMVector3Length(corner - centre)));
+            }
+    // Every level contains the complete hall. Different radii still give the
+    // near cascade the highest texel density without camera-dependent motion.
+    const float baseRadius = ceilf(sceneRadius + 2.0f);
+    for (UINT cascade = 0; cascade < ShadowMap::CascadeCount; ++cascade)
+    {
+        const float radius = baseRadius + static_cast<float>(cascade) * 8.0f;
+        const XMMATRIX lightView = XMMatrixLookAtLH(centre - lightDir * (radius * 2.0f), centre, lightUp);
+        const XMMATRIX lightProjection = XMMatrixOrthographicOffCenterLH(
+            -radius, radius, -radius, radius, 0.0f, radius * 4.0f);
+        result[cascade] = lightView * lightProjection;
     }
     return result;
 }
@@ -451,7 +549,11 @@ void DrawFrame(float dt)
     g_appTime += dt;
     const XMMATRIX viewProj = Camera::ViewProjection(g_camPos, g_camYaw, g_camPitch, g_width, g_height);
     const auto cascadeSplits = CascadeSplits();
-    const auto cascadeMatrices = CascadeMatrices(cascadeSplits);
+    const auto cascadeMatrices = CascadeMatrices();
+    constexpr XMFLOAT4 pointLightPositionRange{0.0f, -4.5f, 2.0f, 22.0f};
+    const auto pointMatrices = PointShadowMatrices(
+        XMFLOAT3(pointLightPositionRange.x, pointLightPositionRange.y, pointLightPositionRange.z),
+        pointLightPositionRange.w);
 
     ThrowIfFailed(g_cmdAlloc[g_frameIndex]->Reset());
     ID3D12PipelineState* initialPipeline = g_tessellationEnabled
@@ -470,8 +572,32 @@ void DrawFrame(float dt)
             g_cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
             g_cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
             g_sceneRenderer.DrawShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_shadowPipeline.Get(), cascadeMatrices[cascade], cascade);
+            g_sceneObjectRenderer.DrawDebugCubeShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_shadowPipeline.Get(), cascadeMatrices[cascade], cascade);
         }
         g_shadowMap.TransitionToShaderResource(g_cmdList.Get());
+
+        g_pointShadowMap.TransitionToRenderTarget(g_cmdList.Get());
+        D3D12_VIEWPORT pointViewport{};
+        pointViewport.Width = static_cast<float>(PointShadowMap::Resolution);
+        pointViewport.Height = static_cast<float>(PointShadowMap::Resolution);
+        pointViewport.MaxDepth = 1.0f;
+        D3D12_RECT pointScissor{0, 0, static_cast<LONG>(PointShadowMap::Resolution), static_cast<LONG>(PointShadowMap::Resolution)};
+        g_cmdList->RSSetViewports(1, &pointViewport);
+        g_cmdList->RSSetScissorRects(1, &pointScissor);
+        for (UINT face = 0; face < PointShadowMap::FaceCount; ++face)
+        {
+            const auto rtv = g_pointShadowMap.Rtv(face);
+            const auto dsv = g_pointShadowMap.Dsv(face);
+            constexpr float clearDistance[] = {1.0f, 0.0f, 0.0f, 0.0f};
+            g_cmdList->ClearRenderTargetView(rtv, clearDistance, 0, nullptr);
+            g_cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            g_cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+            g_sceneRenderer.DrawPointShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_pointShadowPipeline.Get(),
+                pointMatrices[face], face, pointLightPositionRange);
+            g_sceneObjectRenderer.DrawDebugCubePointShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_pointShadowPipeline.Get(),
+                pointMatrices[face], face, pointLightPositionRange);
+        }
+        g_pointShadowMap.TransitionToShaderResource(g_cmdList.Get());
     }
 
     GBuffer& gb = g_renderSys.GBufferTargets();
@@ -489,10 +615,13 @@ void DrawFrame(float dt)
     g_cmdList->RSSetScissorRects(1, &scissor);
 
     DrawScene(viewProj);
-    g_rainSphereRenderer.Draw(
-        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineGeoSimple.Get(),
-        g_renderSys.RainLights(), viewProj, g_camPos, g_appTime, g_frustumCullingEnabled,
+    g_sceneObjectRenderer.Draw(
+        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineGeoMarker.Get(),
+        viewProj, g_camPos, g_appTime, g_frustumCullingEnabled,
         true, g_cullingStats);
+    g_sceneObjectRenderer.DrawDebugCube(
+        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineGeoMarker.Get(),
+        viewProj, g_camPos, g_appTime);
     UpdateWindowTitle();
 
     gb.TransitionToShaderResource(g_cmdList.Get());
@@ -510,9 +639,9 @@ void DrawFrame(float dt)
     XMStoreFloat3(&camForward, Camera::Forward(g_camYaw, g_camPitch));
     g_renderSys.UploadFrameConstants(
         g_camPos, camForward, viewProj, g_width, g_height, dt,
-        cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView,
-        g_ssaoEnabled, g_ssaoDebugView);
+        cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView, g_cascadeColorDebug, g_vignetteEnabled, g_shadowMapDebugIndex);
     g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
+    DrawTopCamera(rtv, viewProj);
 
     D3D12_RESOURCE_BARRIER toPresent =
         D3DHelpers::Transition(backBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -600,7 +729,7 @@ void InitD3D(HWND hwnd)
     if (!g_fenceEvent)
         ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
 
-    ThrowIfFailed(g_rainSphereRenderer.Initialize(g_device.Get()));
+    ThrowIfFailed(g_sceneObjectRenderer.Initialize(g_device.Get()));
     CreateSrvHeap();
     CreateGeometryPipeline();
     CreateShadowPipeline();
@@ -613,6 +742,7 @@ void InitD3D(HWND hwnd)
         g_srvDescriptorSize,
         AppPaths::LightingShaderFile().c_str());
     g_shadowMap.Init(g_device.Get(), g_srvHeap.Get(), kShadowSrvBase, g_srvDescriptorSize);
+    g_pointShadowMap.Init(g_device.Get(), g_srvHeap.Get(), kDeferredSrvBase + 10, g_srvDescriptorSize);
     if (!LoadScene())
     {
         MessageBoxW(
@@ -661,14 +791,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_shadowDebugView = !g_shadowDebugView;
             UpdateWindowTitle();
         }
-        else if (wp == 'O' && (lp & (1ll << 30)) == 0)
-        {
-            g_ssaoEnabled = !g_ssaoEnabled;
-            UpdateWindowTitle();
-        }
         else if (wp == 'I' && (lp & (1ll << 30)) == 0)
         {
-            g_ssaoDebugView = !g_ssaoDebugView;
+            g_cascadeColorDebug = !g_cascadeColorDebug;
+            UpdateWindowTitle();
+        }
+        else if (wp == 'V' && (lp & (1ll << 30)) == 0)
+        {
+            g_vignetteEnabled = !g_vignetteEnabled;
+            UpdateWindowTitle();
+        }
+        else if (wp >= '1' && wp <= '4' && (lp & (1ll << 30)) == 0)
+        {
+            g_shadowMapDebugIndex = static_cast<UINT>(wp - '0');
+            UpdateWindowTitle();
+        }
+        else if (wp == '0' && (lp & (1ll << 30)) == 0)
+        {
+            g_shadowMapDebugIndex = 0;
             UpdateWindowTitle();
         }
         return 0;

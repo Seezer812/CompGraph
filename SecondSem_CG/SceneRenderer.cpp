@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <cfloat>
 #include <unordered_map>
 
 using Microsoft::WRL::ComPtr;
@@ -52,6 +53,14 @@ bool IsBackgroundMaterial(const Obj::Material& material)
     return material.name == "Material__25" || material.name == "Material__298" ||
         material.name == "Material__47";
 }
+
+bool IsShadowCasterMaterial(const Obj::Material& material)
+{
+    // A shadow map must contain the complete Sponza interior: every wall,
+    // floor, roof and decorative object can occlude a light. The photographic
+    // exterior backdrop is the only imported geometry intentionally excluded.
+    return !IsBackgroundMaterial(material);
+}
 } // namespace
 
 bool SceneRenderer::Load(
@@ -73,6 +82,39 @@ bool SceneRenderer::Load(
         return submesh.materialIndex < m_mesh.materials.size() &&
             IsBackgroundMaterial(m_mesh.materials[submesh.materialIndex]);
     });
+
+    // Cache a world-space AABB for the objects used by DrawShadow.  This lets
+    // each cascade include upstream casters in its light-space Z range.
+    m_shadowCasterBoundsMin = XMFLOAT3(FLT_MAX, FLT_MAX, FLT_MAX);
+    m_shadowCasterBoundsMax = XMFLOAT3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    m_hasShadowCasterBounds = false;
+    const XMMATRIX sceneWorld = XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI);
+    for (const auto& submesh : m_mesh.submeshes)
+    {
+        if (submesh.materialIndex >= m_mesh.materials.size() ||
+            !IsShadowCasterMaterial(m_mesh.materials[submesh.materialIndex]))
+            continue;
+        const size_t end = static_cast<size_t>(submesh.indexStart) + submesh.indexCount;
+        for (size_t i = submesh.indexStart; i < end && i < m_mesh.indices.size(); ++i)
+        {
+            const uint32_t vertexIndex = m_mesh.indices[i];
+            if (vertexIndex >= m_mesh.vertices.size())
+                continue;
+            const auto& vertex = m_mesh.vertices[vertexIndex];
+            const XMVECTOR worldPosition = XMVector3TransformCoord(
+                XMVectorSet(vertex.px, vertex.py, vertex.pz, 1.0f), sceneWorld);
+            const float x = XMVectorGetX(worldPosition);
+            const float y = XMVectorGetY(worldPosition);
+            const float z = XMVectorGetZ(worldPosition);
+            m_shadowCasterBoundsMin.x = (std::min)(m_shadowCasterBoundsMin.x, x);
+            m_shadowCasterBoundsMin.y = (std::min)(m_shadowCasterBoundsMin.y, y);
+            m_shadowCasterBoundsMin.z = (std::min)(m_shadowCasterBoundsMin.z, z);
+            m_shadowCasterBoundsMax.x = (std::max)(m_shadowCasterBoundsMax.x, x);
+            m_shadowCasterBoundsMax.y = (std::max)(m_shadowCasterBoundsMax.y, y);
+            m_shadowCasterBoundsMax.z = (std::max)(m_shadowCasterBoundsMax.z, z);
+            m_hasShadowCasterBounds = true;
+        }
+    }
 
     m_vertexBuffer = D3DHelpers::CreateUploadBuffer(device, m_mesh.vertices.data(), m_mesh.vertices.size() * sizeof(Obj::MeshVertex));
     m_indexBuffer = D3DHelpers::CreateUploadBuffer(device, m_mesh.indices.data(), m_mesh.indices.size() * sizeof(uint32_t));
@@ -142,8 +184,10 @@ bool SceneRenderer::Load(
 
     const UINT materialCount = (std::max)(1u, static_cast<UINT>(m_mesh.materials.size()));
     m_materialConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, materialCount * kCbAlignment);
-    m_frameConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, kCbAlignment);
-    m_shadowConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, 4 * kCbAlignment);
+    // Main camera and top camera are encoded in one command list.  Keep a
+    // separate frame constant slot for each draw until the GPU consumes them.
+    m_frameConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, 4 * kCbAlignment);
+    m_shadowConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, 10 * kCbAlignment);
     D3D12_RANGE range{0, 0}; m_frameConstants->Map(0, &range, reinterpret_cast<void**>(&m_frameConstantsMapped));
     m_shadowConstants->Map(0, &range, reinterpret_cast<void**>(&m_shadowConstantsMapped));
     uint8_t* mapped = nullptr; m_materialConstants->Map(0, &range, reinterpret_cast<void**>(&mapped));
@@ -162,8 +206,10 @@ bool SceneRenderer::Load(
 void SceneRenderer::Draw(ID3D12GraphicsCommandList* commandList, ID3D12DescriptorHeap* srvHeap, ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState, const XMMATRIX& viewProjection, const XMFLOAT3& cameraPosition, float timeSeconds, bool tessellationEnabled) const
 {
     if (!m_ready) return;
-    FrameConstants frame{}; XMStoreFloat4x4(&frame.world, XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI)); XMStoreFloat4x4(&frame.viewProjection, viewProjection); frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z); frame.uvAnimation = XMFLOAT4(.035f, .022f, tessellationEnabled ? 1.f : 0.f, 0.f); std::memcpy(m_frameConstantsMapped, &frame, sizeof(frame));
-    ID3D12DescriptorHeap* heaps[] = {srvHeap}; commandList->SetDescriptorHeaps(1, heaps); commandList->SetGraphicsRootSignature(rootSignature); commandList->SetPipelineState(pipelineState); commandList->SetGraphicsRootConstantBufferView(0, m_frameConstants->GetGPUVirtualAddress()); commandList->IASetPrimitiveTopology(tessellationEnabled ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); commandList->IASetVertexBuffers(0, 1, &m_vertexView); commandList->IASetIndexBuffer(&m_indexView);
+    FrameConstants frame{}; XMStoreFloat4x4(&frame.world, XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI)); XMStoreFloat4x4(&frame.viewProjection, viewProjection); frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z); frame.uvAnimation = XMFLOAT4(.035f, .022f, tessellationEnabled ? 1.f : 0.f, 0.f);
+    const UINT frameSlot = m_nextFrameConstantSlot++ % 4;
+    std::memcpy(m_frameConstantsMapped + static_cast<size_t>(frameSlot) * kCbAlignment, &frame, sizeof(frame));
+    ID3D12DescriptorHeap* heaps[] = {srvHeap}; commandList->SetDescriptorHeaps(1, heaps); commandList->SetGraphicsRootSignature(rootSignature); commandList->SetPipelineState(pipelineState); commandList->SetGraphicsRootConstantBufferView(0, m_frameConstants->GetGPUVirtualAddress() + static_cast<UINT64>(frameSlot) * kCbAlignment); commandList->IASetPrimitiveTopology(tessellationEnabled ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); commandList->IASetVertexBuffers(0, 1, &m_vertexView); commandList->IASetIndexBuffer(&m_indexView);
     const auto base = srvHeap->GetGPUDescriptorHandleForHeapStart();
     for (const auto& submesh : m_mesh.submeshes) { if (submesh.materialIndex >= m_materialSrvBase.size() || IsBackgroundMaterial(m_mesh.materials[submesh.materialIndex])) continue; auto table = base; table.ptr += static_cast<SIZE_T>(m_materialSrvBase[submesh.materialIndex]) * m_srvDescriptorSize; commandList->SetGraphicsRootConstantBufferView(1, m_materialConstants->GetGPUVirtualAddress() + static_cast<UINT64>(submesh.materialIndex) * kCbAlignment); commandList->SetGraphicsRootDescriptorTable(2, table); commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0); }
 }
@@ -171,7 +217,7 @@ void SceneRenderer::Draw(ID3D12GraphicsCommandList* commandList, ID3D12Descripto
 void SceneRenderer::DrawShadow(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState, const XMMATRIX& lightViewProjection, UINT cascade) const
 {
     if (!m_ready) return;
-    struct ShadowConstants { XMFLOAT4X4 world; XMFLOAT4X4 lightViewProjection; } constants{};
+    struct ShadowConstants { XMFLOAT4X4 world; XMFLOAT4X4 lightViewProjection; XMFLOAT4 lightPositionRange; } constants{};
     XMStoreFloat4x4(&constants.world, XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI));
     XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
     const UINT shadowSlot = cascade % 4;
@@ -184,8 +230,42 @@ void SceneRenderer::DrawShadow(ID3D12GraphicsCommandList* commandList, ID3D12Roo
     commandList->IASetIndexBuffer(&m_indexView);
     for (const auto& submesh : m_mesh.submeshes)
     {
-        if (submesh.materialIndex < m_mesh.materials.size() && IsBackgroundMaterial(m_mesh.materials[submesh.materialIndex]))
+        if (submesh.materialIndex < m_mesh.materials.size() && !IsShadowCasterMaterial(m_mesh.materials[submesh.materialIndex]))
             continue;
         commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0);
     }
+}
+
+void SceneRenderer::DrawPointShadow(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* rootSignature,
+    ID3D12PipelineState* pipelineState, const XMMATRIX& lightViewProjection, UINT face,
+    const XMFLOAT4& lightPositionRange) const
+{
+    if (!m_ready || face >= 6) return;
+    struct ShadowConstants { XMFLOAT4X4 world; XMFLOAT4X4 lightViewProjection; XMFLOAT4 lightPositionRange; } constants{};
+    XMStoreFloat4x4(&constants.world, XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI));
+    XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
+    constants.lightPositionRange = lightPositionRange;
+    const UINT shadowSlot = 4 + face;
+    std::memcpy(m_shadowConstantsMapped + static_cast<size_t>(shadowSlot) * kCbAlignment, &constants, sizeof(constants));
+    commandList->SetGraphicsRootSignature(rootSignature);
+    commandList->SetPipelineState(pipelineState);
+    commandList->SetGraphicsRootConstantBufferView(0, m_shadowConstants->GetGPUVirtualAddress() + static_cast<UINT64>(shadowSlot) * kCbAlignment);
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList->IASetVertexBuffers(0, 1, &m_vertexView);
+    commandList->IASetIndexBuffer(&m_indexView);
+    for (const auto& submesh : m_mesh.submeshes)
+    {
+        if (submesh.materialIndex < m_mesh.materials.size() && !IsShadowCasterMaterial(m_mesh.materials[submesh.materialIndex]))
+            continue;
+        commandList->DrawIndexedInstanced(submesh.indexCount, 1, submesh.indexStart, 0, 0);
+    }
+}
+
+bool SceneRenderer::GetShadowCasterBounds(XMFLOAT3& minimum, XMFLOAT3& maximum) const
+{
+    if (!m_hasShadowCasterBounds)
+        return false;
+    minimum = m_shadowCasterBoundsMin;
+    maximum = m_shadowCasterBoundsMax;
+    return true;
 }

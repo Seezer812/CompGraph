@@ -27,7 +27,7 @@
     <ClCompile Include="Camera.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
-    <ClCompile Include="RainSphereRenderer.cpp">
+    <ClCompile Include="SceneObjectRenderer.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
     <ClCompile Include="D3DHelpers.cpp">
@@ -45,6 +45,9 @@
     <ClCompile Include="ShadowMap.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="PointShadowMap.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
     <ClCompile Include="AppPaths.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
@@ -59,7 +62,7 @@
     <ClInclude Include="Camera.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
-    <ClInclude Include="RainSphereRenderer.h">
+    <ClInclude Include="SceneObjectRenderer.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
     <ClInclude Include="D3DHelpers.h">
@@ -75,6 +78,9 @@
       <Filter>Исходные файлы</Filter>
     </ClInclude>
     <ClInclude Include="ShadowMap.h">
+      <Filter>Исходные файлы</Filter>
+    </ClInclude>
+    <ClInclude Include="PointShadowMap.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
     <ClInclude Include="AppPaths.h">

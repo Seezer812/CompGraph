@@ -29,13 +29,7 @@ enum LightType : UINT
     LIGHT_SPOT = 2,
 };
 
-constexpr UINT kMaxLights = 128;
 constexpr UINT kStaticLightCount = 3;
-constexpr UINT kMaxRainLights = kMaxLights - kStaticLightCount;
-constexpr UINT kRainTilesX = 6;
-constexpr UINT kRainTilesZ = 5;
-constexpr UINT kRainTileCount = kRainTilesX * kRainTilesZ;
-constexpr UINT kRainTileCapacity = 16;
 
 struct LightGpu
 {
@@ -58,14 +52,13 @@ struct LightingCBGPU
     XMFLOAT4 cascadeSplits{};
     XMFLOAT4X4 cascadeMatrices[4]{};
     UINT lightCount = 0;
-    UINT padHdr[3]{};
-    LightGpu lights[kMaxLights]{};
-    // uint4 повторяет упаковку массивов uint4 в HLSL constant buffer.
-    UINT rainTileCounts[8][4]{};
-    UINT rainTileLightIndices[120][4]{};
+    UINT vignetteEnabled = 0;
+    UINT shadowMapDebugIndex = 0;
+    UINT cascadeColorDebug = 0;
+    LightGpu lights[kStaticLightCount]{};
 };
 
-static_assert(sizeof(LightingCBGPU) == 10640);
+static_assert(sizeof(LightingCBGPU) == 592);
 
 void RSCompile(const wchar_t* path, const char* entry, const char* target, ComPtr<ID3DBlob>& out)
 {
@@ -119,81 +112,29 @@ void RenderingSystem::WriteDefaultLights()
     cb.lightCount = kStaticLightCount;
 
     cb.lights[1].type = LIGHT_POINT;
-    cb.lights[1].position_range = XMFLOAT4(0.f, 4.5f, 2.f, 22.f);
+    // Negative Y is upward in the transformed Sponza coordinate system.
+    cb.lights[1].position_range = XMFLOAT4(0.f, -4.5f, 2.f, 22.f);
     cb.lights[1].color_intensity = XMFLOAT4(0.12f, 1.f, 0.82f, 5.5f);
   
 
-    // Bright oblique overhead projector: its side component makes shadows from
-    // columns readable on the Sponza floor instead of hiding directly beneath them.
-    XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(0.62f, 0.70f, -0.35f, 0.f));
+    // Sponza is rotated by 180 degrees around X, so its local "up" points
+    // toward negative world Y.  Positive ray Y places the source above its hall.
+    // Equivalent to the working reference scene after Sponza's X-axis flip:
+    // mostly top-down light with a small lateral component.
+    XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(0.18f, 0.96f, -0.22f, 0.f));
     cb.lights[2].type = LIGHT_DIR;
     XMStoreFloat4(&cb.lights[2].direction_cosOuter, sunDir);
     cb.lights[2].direction_cosOuter.w = 0.f;
-    // The directional light is deliberately dominant: otherwise the dense
-    // decorative point-light rain visually masks its own CSM shadows.
     cb.lights[2].color_intensity = XMFLOAT4(1.0f, 0.93f, 0.80f, 7.0f);
 
     std::memcpy(m_lightingCBMapped, &cb, sizeof(cb));
-}
-
-void RenderingSystem::UpdateLightRain(float deltaTime)
-{
-    if (deltaTime <= 0.0f)
-        return;
-
-    // До заполнения пула все упавшие источники остаются на полу. После 125-го
-    // дождевого источника новые капли вытесняют самые старые.
-    constexpr float kSpawnRate = 18.0f;
-    // OBJ масштабируется в 0.01 и поворачивается вокруг X; его нижняя точка
-    // оказывается примерно на Y = 1.26 в мировых координатах.
-    constexpr float kFloorY = 1.35f;
-    // Sponza повёрнута на PI вокруг X, поэтому визуальный верх сцены —
-    // это отрицательные значения мирового Y.
-    constexpr float kSpawnY = -5.5f;
-    m_rainSpawnRemainder += deltaTime * kSpawnRate;
-
-    auto random01 = [this]() {
-        m_randomState = m_randomState * 1664525u + 1013904223u;
-        return static_cast<float>((m_randomState >> 8) & 0x00FFFFFFu) / 16777215.0f;
-    };
-    auto makeDrop = [&]() {
-        RainLight drop{};
-        drop.position = XMFLOAT3(
-            -5.5f + random01() * 11.0f,
-            kFloorY + random01() * (kSpawnY - kFloorY),
-            -4.5f + random01() * 9.0f);
-        drop.fallSpeed = 2.6f + random01() * 2.2f;
-        return drop;
-    };
-
-    // Дождь виден сразу после запуска: уже есть 100 капель на разных высотах.
-    if (m_rainLights.empty())
-    {
-        m_rainLights.reserve(kMaxRainLights);
-        for (UINT i = 0; i < 100; ++i)
-            m_rainLights.push_back(makeDrop());
-    }
-
-    while (m_rainSpawnRemainder >= 1.0f)
-    {
-        m_rainSpawnRemainder -= 1.0f;
-        if (m_rainLights.size() == kMaxRainLights)
-            m_rainLights.erase(m_rainLights.begin());
-
-        RainLight drop = makeDrop();
-        drop.position.y = kSpawnY;
-        m_rainLights.push_back(drop);
-    }
-
-    for (RainLight& drop : m_rainLights)
-        drop.position.y = (std::min)(kFloorY, drop.position.y + drop.fallSpeed * deltaTime);
 }
 
 void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t* hlslPath)
 {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 11; // G-buffer, CSM, SSAO and three IBL maps.
+    range.NumDescriptors = 11; // G-buffer, four CSM maps, three IBL maps and point-light cubemap.
     range.BaseShaderRegister = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -274,7 +215,7 @@ void RenderingSystem::Init(
     const wchar_t* deferredHlslPath)
 {
     m_gbufferSrvBase = gbufferSrvStartIndex;
-    m_iblSrvBase = gbufferSrvStartIndex + 8;
+    m_iblSrvBase = gbufferSrvStartIndex + 7;
     m_srvDescriptorIncrement = srvDescriptorIncrement;
 
     m_gbuffer.Init(device, width, height);
@@ -282,8 +223,6 @@ void RenderingSystem::Init(
         device, shaderVisibleSrvHeap, gbufferSrvStartIndex, srvDescriptorIncrement);
 
     CreateLightingPipeline(device, deferredHlslPath);
-    CreateSsaoPipeline(device, deferredHlslPath);
-    CreateSsaoTarget(device, width, height, shaderVisibleSrvHeap);
 
     m_lightingCB = CreateUploadCb(device, sizeof(LightingCBGPU));
     D3D12_RANGE rr{0, 0};
@@ -305,7 +244,6 @@ void RenderingSystem::Resize(
     m_gbuffer.Resize(device, width, height);
     m_gbuffer.CreateShaderResourceViews(
         device, shaderVisibleSrvHeap, m_gbufferSrvBase, srvDescriptorIncrement);
-    CreateSsaoTarget(device, width, height, shaderVisibleSrvHeap);
 }
 
 void RenderingSystem::UploadFrameConstants(
@@ -319,28 +257,25 @@ void RenderingSystem::UploadFrameConstants(
     const std::array<float, 4>& cascadeSplits,
     bool shadowsEnabled,
     bool shadowDebugView,
-    bool ssaoEnabled,
-    bool ssaoDebugView)
+    bool cascadeColorDebug,
+    bool vignetteEnabled,
+    UINT shadowMapDebugIndex)
 {
-    UpdateLightRain(deltaTime);
-
     auto* cb = reinterpret_cast<LightingCBGPU*>(m_lightingCBMapped);
-    // w components carry post-process controls without changing constant-buffer layout.
-    cb->cameraPos_pad = XMFLOAT4(cameraPos.x, cameraPos.y, cameraPos.z, ssaoEnabled ? 1.0f : 0.0f);
+    cb->cameraPos_pad = XMFLOAT4(cameraPos.x, cameraPos.y, cameraPos.z, 0.0f);
     const float iw = screenW > 0 ? 1.f / static_cast<float>(screenW) : 1.f;
     const float ih = screenH > 0 ? 1.f / static_cast<float>(screenH) : 1.f;
-    cb->invScreen_pad = XMFLOAT4(iw, ih, shadowDebugView ? 1.0f : 0.0f, ssaoDebugView ? 1.0f : 0.0f);
+    cb->invScreen_pad = XMFLOAT4(iw, ih, shadowDebugView ? 1.0f : 0.0f, 0.0f);
     XMStoreFloat4x4(&cb->inverseViewProjection, XMMatrixInverse(nullptr, viewProjection));
     cb->cameraForward_shadowEnabled = XMFLOAT4(cameraForward.x, cameraForward.y, cameraForward.z, shadowsEnabled ? 1.0f : 0.0f);
     cb->cascadeSplits = XMFLOAT4(cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3]);
     for (UINT i = 0; i < 4; ++i)
         XMStoreFloat4x4(&cb->cascadeMatrices[i], cascadeMatrices[i]);
 
-    cb->lightCount = kStaticLightCount + static_cast<UINT>(m_rainLights.size());
-    // Сетка описывает только текущий кадр: без очистки её счётчики накапливались
-    // и после нескольких кадров переставали принимать новые дождевые источники.
-    std::memset(cb->rainTileCounts, 0, sizeof(cb->rainTileCounts));
-    std::memset(cb->rainTileLightIndices, 0, sizeof(cb->rainTileLightIndices));
+    cb->lightCount = kStaticLightCount;
+    cb->vignetteEnabled = vignetteEnabled ? 1u : 0u;
+    cb->shadowMapDebugIndex = shadowMapDebugIndex;
+    cb->cascadeColorDebug = cascadeColorDebug ? 1u : 0u;
 
     const XMVECTOR axis = XMVector3Normalize(XMLoadFloat3(&cameraForward));
     const XMVECTOR eye = XMLoadFloat3(&cameraPos);
@@ -354,30 +289,6 @@ void RenderingSystem::UploadFrameConstants(
     spot.spotCosInner = cosf(XM_PI / 10.f);
     spot.color_intensity = XMFLOAT4(1.f, 0.97f, 0.9f, 0.0f);
 
-    for (UINT i = 0; i < m_rainLights.size(); ++i)
-    {
-        const RainLight& drop = m_rainLights[i];
-        LightGpu& light = cb->lights[kStaticLightCount + i];
-        light.type = LIGHT_POINT;
-        // Ограниченный радиус не даёт десяткам лежащих капель пересветить сцену.
-        light.position_range = XMFLOAT4(drop.position.x, drop.position.y, drop.position.z, 2.35f);
-        // Небольшие различия оттенка делают отдельные "капли" различимыми.
-        const float hue = static_cast<float>((i * 37u) % 100u) / 100.0f;
-        // Decorative rain lights must not overpower the sun and hide its shadows.
-        light.color_intensity = XMFLOAT4(0.25f + hue * 0.35f, 0.45f + hue * 0.35f, 1.0f, 3.0f);
-
-        // Экранный пиксель проверяет только источники из своей и соседних ячеек.
-        // Поэтому 125 источников не превращаются в 125 вычислений на каждый пиксель.
-        const int tileX = (std::clamp)(static_cast<int>((drop.position.x + 6.0f) / 2.0f), 0, 5);
-        const int tileZ = (std::clamp)(static_cast<int>((drop.position.z + 5.0f) / 2.0f), 0, 4);
-        const UINT tile = static_cast<UINT>(tileZ * kRainTilesX + tileX);
-        UINT& count = cb->rainTileCounts[tile / 4][tile % 4];
-        if (count < kRainTileCapacity)
-        {
-            const UINT index = tile * kRainTileCapacity + count++;
-            cb->rainTileLightIndices[index / 4][index % 4] = kStaticLightCount + i;
-        }
-    }
 }
 
 bool RenderingSystem::LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
@@ -404,146 +315,6 @@ bool RenderingSystem::LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
     return true;
 }
 
-void RenderingSystem::CreateSsaoPipeline(ID3D12Device* device, const wchar_t* hlslPath)
-{
-    D3D12_DESCRIPTOR_RANGE range{};
-    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 3; // G-buffer: albedo is unused, normal and depth are sampled.
-    range.BaseShaderRegister = 0;
-    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_ROOT_PARAMETER params[2]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[1].DescriptorTable.NumDescriptorRanges = 1;
-    params[1].DescriptorTable.pDescriptorRanges = &range;
-    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_STATIC_SAMPLER_DESC sampler{};
-    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.ShaderRegister = 0;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_ROOT_SIGNATURE_DESC rs{};
-    rs.NumParameters = _countof(params);
-    rs.pParameters = params;
-    rs.NumStaticSamplers = 1;
-    rs.pStaticSamplers = &sampler;
-    rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-    ComPtr<ID3DBlob> sigBlob, rsErr;
-    HRESULT hr = D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sigBlob, &rsErr);
-    if (FAILED(hr)) std::exit(static_cast<int>(hr));
-    hr = device->CreateRootSignature(0, sigBlob->GetBufferPointer(), sigBlob->GetBufferSize(), IID_PPV_ARGS(&m_rootSigSsao));
-    if (FAILED(hr)) std::exit(static_cast<int>(hr));
-
-    ComPtr<ID3DBlob> vs, ps;
-    RSCompile(hlslPath, "SsaoFullscreenVS", "vs_5_0", vs);
-    RSCompile(hlslPath, "SsaoPS", "ps_5_0", ps);
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
-    pso.pRootSignature = m_rootSigSsao.Get();
-    pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
-    pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
-    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    pso.DepthStencilState.DepthEnable = FALSE;
-    pso.SampleMask = UINT_MAX;
-    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pso.NumRenderTargets = 1;
-    pso.RTVFormats[0] = DXGI_FORMAT_R8_UNORM;
-    pso.SampleDesc.Count = 1;
-    hr = device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_psoSsao));
-    if (FAILED(hr)) std::exit(static_cast<int>(hr));
-}
-
-void RenderingSystem::CreateSsaoTarget(ID3D12Device* device, UINT width, UINT height, ID3D12DescriptorHeap* srvHeap)
-{
-    m_ssaoTarget.Reset();
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-    D3D12_RESOURCE_DESC desc{};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    desc.Width = width;
-    desc.Height = height;
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
-    desc.Format = DXGI_FORMAT_R8_UNORM;
-    desc.SampleDesc.Count = 1;
-    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-    D3D12_CLEAR_VALUE clear{};
-    clear.Format = desc.Format;
-    clear.Color[0] = 1.0f;
-    HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear, IID_PPV_ARGS(&m_ssaoTarget));
-    if (FAILED(hr)) std::exit(static_cast<int>(hr));
-    m_ssaoState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-    if (!m_ssaoRtvHeap)
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
-        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        heapDesc.NumDescriptors = 1;
-        hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_ssaoRtvHeap));
-        if (FAILED(hr)) std::exit(static_cast<int>(hr));
-    }
-    device->CreateRenderTargetView(m_ssaoTarget.Get(), nullptr, m_ssaoRtvHeap->GetCPUDescriptorHandleForHeapStart());
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_R8_UNORM;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Texture2D.MipLevels = 1;
-    D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = srvHeap->GetCPUDescriptorHandleForHeapStart();
-    // 400..402 are G-buffer, 403..406 are CSM depth maps; AO follows them.
-    srvHandle.ptr += static_cast<SIZE_T>(m_gbufferSrvBase + 7) * m_srvDescriptorIncrement;
-    device->CreateShaderResourceView(m_ssaoTarget.Get(), &srv, srvHandle);
-}
-
-void RenderingSystem::DrawSsaoPass(
-    ID3D12GraphicsCommandList* cmd,
-    ID3D12DescriptorHeap* srvHeapShaderVisible,
-    UINT screenW,
-    UINT screenH)
-{
-    D3D12_RESOURCE_BARRIER toRtv = D3DHelpers::Transition(
-        m_ssaoTarget.Get(), m_ssaoState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    cmd->ResourceBarrier(1, &toRtv);
-    m_ssaoState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-
-    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_ssaoRtvHeap->GetCPUDescriptorHandleForHeapStart();
-    const float clear[4] = {1.f, 1.f, 1.f, 1.f};
-    cmd->ClearRenderTargetView(rtv, clear, 0, nullptr);
-    cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-
-    ID3D12DescriptorHeap* heaps[] = {srvHeapShaderVisible};
-    cmd->SetDescriptorHeaps(1, heaps);
-    cmd->SetGraphicsRootSignature(m_rootSigSsao.Get());
-    cmd->SetPipelineState(m_psoSsao.Get());
-    cmd->SetGraphicsRootConstantBufferView(0, m_lightingCB->GetGPUVirtualAddress());
-    D3D12_GPU_DESCRIPTOR_HANDLE table = srvHeapShaderVisible->GetGPUDescriptorHandleForHeapStart();
-    table.ptr += static_cast<SIZE_T>(m_gbufferSrvBase) * static_cast<SIZE_T>(m_srvDescriptorIncrement);
-    cmd->SetGraphicsRootDescriptorTable(1, table);
-
-    D3D12_VIEWPORT vp{};
-    vp.Width = static_cast<float>(screenW);
-    vp.Height = static_cast<float>(screenH);
-    vp.MaxDepth = 1.f;
-    D3D12_RECT scissor{0, 0, static_cast<LONG>(screenW), static_cast<LONG>(screenH)};
-    cmd->RSSetViewports(1, &vp);
-    cmd->RSSetScissorRects(1, &scissor);
-    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmd->DrawInstanced(3, 1, 0, 0);
-
-    D3D12_RESOURCE_BARRIER toSrv = D3DHelpers::Transition(
-        m_ssaoTarget.Get(), m_ssaoState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    cmd->ResourceBarrier(1, &toSrv);
-    m_ssaoState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-}
-
 void RenderingSystem::DrawLightingPass(
     ID3D12GraphicsCommandList* cmd,
     ID3D12DescriptorHeap* srvHeapShaderVisible,
@@ -551,8 +322,6 @@ void RenderingSystem::DrawLightingPass(
     UINT screenW,
     UINT screenH)
 {
-    DrawSsaoPass(cmd, srvHeapShaderVisible, screenW, screenH);
-
     ID3D12DescriptorHeap* heaps[] = {srvHeapShaderVisible};
     cmd->SetDescriptorHeaps(1, heaps);
 

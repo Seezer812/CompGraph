@@ -43,6 +43,17 @@ public:
         const DirectX::XMMATRIX& lightViewProjection,
         UINT cascade) const;
 
+    void DrawPointShadow(
+        ID3D12GraphicsCommandList* commandList,
+        ID3D12RootSignature* rootSignature,
+        ID3D12PipelineState* pipelineState,
+        const DirectX::XMMATRIX& lightViewProjection,
+        UINT face,
+        const DirectX::XMFLOAT4& lightPositionRange) const;
+
+    // World-space bounds of Sponza geometry used by the shadow pass.
+    bool GetShadowCasterBounds(DirectX::XMFLOAT3& minimum, DirectX::XMFLOAT3& maximum) const;
+
     bool IsReady() const { return m_ready; }
 
 private:
@@ -58,7 +69,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_materialConstants;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_frameConstants;
     uint8_t* m_frameConstantsMapped = nullptr;
+    mutable UINT m_nextFrameConstantSlot = 0;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_shadowConstants;
     uint8_t* m_shadowConstantsMapped = nullptr;
+    DirectX::XMFLOAT3 m_shadowCasterBoundsMin{};
+    DirectX::XMFLOAT3 m_shadowCasterBoundsMax{};
+    bool m_hasShadowCasterBounds = false;
     UINT m_srvDescriptorSize = 0;
 };

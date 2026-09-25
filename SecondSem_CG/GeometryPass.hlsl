@@ -143,6 +143,21 @@ GeoRtOut GeometryPS(GeoVsOut input)
         normalW = normalize(tangent * normalT.x + bitangent * normalT.y + normalW * normalT.z);
     }
     output.normal = float4(normalW, roughness);
-    output.depth = input.clipPos.z / input.clipPos.w;
+    // In a pixel shader SV_POSITION.z is already the post-projection depth
+    // in the [0, 1] range. SV_POSITION.w is reciprocal clip-space W here;
+    // dividing by it again corrupts the depth used to reconstruct world space.
+    output.depth = input.clipPos.z;
     return output;
+}
+
+// Forward-шейдер второго viewport. Он выводит полноценную геометрию сцены
+// прямо в back buffer, не изменяя основной G-buffer.
+float4 TopCameraPS(GeoVsOut input) : SV_Target
+{
+    float2 uv = input.uv * UvScale + UvOffset;
+    if (UseUvAnim)
+        uv += UvAnimAndPad.xy * TimeCamPos.x;
+    const float3 albedo = Albedo.Sample(Samp, uv).rgb * Kd.rgb;
+    const float light = 0.30f + 0.70f * saturate(dot(normalize(input.nrmW), normalize(float3(0.35f, 0.8f, -0.25f))));
+    return float4(albedo * light, 1.0f);
 }

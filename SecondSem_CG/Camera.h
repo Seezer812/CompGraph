@@ -6,6 +6,9 @@
 namespace Camera
 {
 
+constexpr float NearPlane = 0.1f;
+constexpr float FarPlane = 200.0f;
+
 DirectX::XMVECTOR Forward(float yaw, float pitch);
 
 DirectX::XMMATRIX ViewProjection(

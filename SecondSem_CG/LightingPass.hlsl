@@ -4,17 +4,16 @@ Texture2D GAlbedo : register(t0);
 Texture2D GNormal : register(t1);
 Texture2D GDepth : register(t2);
 Texture2D ShadowMaps[4] : register(t3);
-Texture2D AmbientOcclusion : register(t7);
-TextureCube IrradianceMap : register(t8);
-TextureCube PreFilteredEnvMap : register(t9);
-Texture2D IntegrationMap : register(t10);
+TextureCube IrradianceMap : register(t7);
+TextureCube PreFilteredEnvMap : register(t8);
+Texture2D IntegrationMap : register(t9);
+TextureCube PointShadowMap : register(t10);
 SamplerState GSamp : register(s0);
 SamplerComparisonState ShadowSamp : register(s1);
 
 #define LIGHT_DIR 0
 #define LIGHT_POINT 1
 #define LIGHT_SPOT 2
-#define MAX_LIGHTS 128
 
 struct GpuLight
 {
@@ -35,10 +34,10 @@ cbuffer LightingCB : register(b0)
     float4 CascadeSplits;
     row_major float4x4 CascadeMatrices[4];
     uint LightCount;
-    uint3 padHdr;
-    GpuLight Lights[MAX_LIGHTS];
-    uint4 RainTileCounts[8];
-    uint4 RainTileLightIndices[120];
+    uint VignetteEnabled;
+    uint ShadowMapDebugIndex;
+    uint CascadeColorDebug;
+    GpuLight Lights[3];
 };
 
 float SampleCascade(uint cascade, float2 uv, float depth)
@@ -50,20 +49,53 @@ float SampleCascade(uint cascade, float2 uv, float depth)
     return ShadowMaps[3].SampleCmpLevelZero(ShadowSamp, uv, depth);
 }
 
+float SampleShadowMapDepth(uint mapIndex, float2 uv)
+{
+    // Explicit branches keep the texture-array index literal for Shader Model 5.
+    if (mapIndex == 1) return ShadowMaps[0].Sample(GSamp, uv).r;
+    if (mapIndex == 2) return ShadowMaps[1].Sample(GSamp, uv).r;
+    if (mapIndex == 3) return ShadowMaps[2].Sample(GSamp, uv).r;
+    return ShadowMaps[3].Sample(GSamp, uv).r;
+}
+
 float ShadowPcf(uint cascade, float3 position, float3 normal, float3 lightDirection)
 {
     float4 lightClip = mul(float4(position, 1.0f), CascadeMatrices[cascade]);
     float3 uvz = lightClip.xyz / max(lightClip.w, 1e-5f);
     float2 uv = uvz.xy * float2(0.5f, -0.5f) + 0.5f;
     if (uvz.z <= 0.0f || uvz.z >= 1.0f || any(uv < 0.0f) || any(uv > 1.0f)) return 1.0f;
-    // The Sponza walls contain very dense coplanar details; a larger slope bias
-    // prevents the surface from shadowing itself (shadow acne).
-    float bias = max(0.0040f * (1.0f - saturate(dot(normal, lightDirection))), 0.0015f);
+    // Increased receiver bias reduces self-shadowing (shadow acne) on surfaces.
+    float bias = max(0.0030f * (1.0f - saturate(dot(normal, lightDirection))), 0.0007f);
     float2 texel = 1.0f / 2048.0f;
+    float visibility = 0.0f;
+    [unroll] for (int y = -2; y <= 2; ++y)
+    [unroll] for (int x = -2; x <= 2; ++x)
+        visibility += SampleCascade(cascade, uv + float2(x, y) * texel, uvz.z - bias);
+    return visibility / 25.0f;
+}
+
+float PointShadowVisibility(float3 position, float3 normal, GpuLight light)
+{
+    float3 fromLight = position - light.position_range.xyz;
+    float distanceToLight = length(fromLight);
+    float range = light.position_range.w;
+    if (distanceToLight <= 1e-4f || distanceToLight >= range) return 1.0f;
+
+    float3 direction = fromLight / distanceToLight;
+    float3 helper = abs(direction.y) < 0.95f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    float3 tangent = normalize(cross(direction, helper));
+    float3 bitangent = cross(direction, tangent);
+    float bias = max(0.0012f, 0.003f * (1.0f - saturate(dot(normal, -direction))));
+    float referenceDistance = distanceToLight / range - bias;
+    const float filterRadius = 2.0f / 1024.0f;
     float visibility = 0.0f;
     [unroll] for (int y = -1; y <= 1; ++y)
     [unroll] for (int x = -1; x <= 1; ++x)
-        visibility += SampleCascade(cascade, uv + float2(x, y) * texel, uvz.z - bias);
+    {
+        float3 sampleDirection = normalize(direction + (tangent * x + bitangent * y) * filterRadius);
+        float nearestDistance = PointShadowMap.SampleLevel(GSamp, sampleDirection, 0).r;
+        visibility += referenceDistance <= nearestDistance ? 1.0f : 0.0f;
+    }
     return visibility / 9.0f;
 }
 
@@ -74,69 +106,16 @@ FsOut LightingFullscreenVS(uint vertexId : SV_VertexID)
     FsOut output;
     float2 uv = float2((vertexId << 1) & 2, vertexId & 2);
     output.pos = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+    // G-buffer sampling uses top-left texture coordinates; restore its vertical
+    // UV flip and use the matching NDC convention in ReconstructWorldPosition.
     output.uv = float2(uv.x, 1.0f - uv.y);
     return output;
 }
 
-// SSAO is a separate full-screen post-process. It reconstructs world-space
-// positions from the G-buffer and writes one accessibility value per pixel.
-// A deterministic per-pixel rotation avoids visible radial banding without a
-// separate noise texture.
-FsOut SsaoFullscreenVS(uint vertexId : SV_VertexID)
-{
-    return LightingFullscreenVS(vertexId);
-}
-
 float3 ReconstructWorldPosition(float2 uv, float depth)
 {
-    float4 world = mul(float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f, depth, 1.0f), InverseViewProjection);
+    float4 world = mul(float4(uv.x * 2.0f - 1.0f, uv.y * 2.0f - 1.0f, depth, 1.0f), InverseViewProjection);
     return world.xyz / max(world.w, 1e-6f);
-}
-
-float Hash12(float2 p)
-{
-    float3 p3 = frac(float3(p.xyx) * 0.1031f);
-    p3 += dot(p3, p3.yzx + 33.33f);
-    return frac((p3.x + p3.y) * p3.z);
-}
-
-float4 SsaoPS(FsOut input) : SV_Target0
-{
-    float3 normal = GNormal.Sample(GSamp, input.uv).xyz;
-    if (dot(normal, normal) < 1e-6f)
-        return 1.0f;
-
-    const float centerDepth = GDepth.Sample(GSamp, input.uv).r;
-    const float3 center = ReconstructWorldPosition(input.uv, centerDepth);
-    normal = normalize(normal);
-    const float angle = Hash12(input.uv * float2(InvScreen_pad.x > 0 ? 1.0f / InvScreen_pad.x : 1.0f,
-                                                  InvScreen_pad.y > 0 ? 1.0f / InvScreen_pad.y : 1.0f)) * 6.2831853f;
-    const float2 rotation = float2(cos(angle), sin(angle));
-    const float2 texel = InvScreen_pad.xy;
-    const float radiusPixels = 18.0f;
-    const float radiusWorld = 0.75f;
-    float occlusion = 0.0f;
-
-    [unroll] for (int i = 0; i < 12; ++i)
-    {
-        const float a = (6.2831853f * i) / 12.0f;
-        const float2 direction = float2(cos(a) * rotation.x - sin(a) * rotation.y,
-                                        cos(a) * rotation.y + sin(a) * rotation.x);
-        // Alternating rings cover both tiny cracks and larger corners.
-        const float ring = 0.35f + 0.65f * frac(i * 0.6180339f + 0.25f);
-        const float2 sampleUv = input.uv + direction * texel * radiusPixels * ring;
-        const float sampleDepth = GDepth.SampleLevel(GSamp, sampleUv, 0).r;
-        const float3 samplePosition = ReconstructWorldPosition(sampleUv, sampleDepth);
-        const float3 delta = samplePosition - center;
-        const float distanceToSample = length(delta);
-        const float facing = dot(normal, delta / max(distanceToSample, 1e-4f));
-        // Only a nearby surface lying in the outward normal hemisphere can
-        // block ambient light at the current surface point.
-        const float nearby = 1.0f - smoothstep(radiusWorld * 0.45f, radiusWorld, distanceToSample);
-        occlusion += step(0.055f, facing) * nearby;
-    }
-    const float accessibility = 1.0f - (occlusion / 12.0f) * 0.78f;
-    return float4(saturate(accessibility).xxx, 1.0f);
 }
 
 static const float PI = 3.14159265359f;
@@ -206,25 +185,29 @@ float3 EvaluateLight(GpuLight light, float3 albedo, float metallic, float roughn
 
 float4 LightingPS(FsOut input) : SV_Target0
 {
-    float4 packedAlbedo = GAlbedo.Sample(GSamp, input.uv);
+    if (ShadowMapDebugIndex != 0)
+    {
+        const float depth = SampleShadowMapDepth(ShadowMapDebugIndex, input.uv);
+        // Reversed contrast makes nearby shadow casters immediately visible.
+        const float visibleDepth = pow(saturate(1.0f - depth), 0.32f);
+        return float4(visibleDepth.xxx, 1.0f);
+    }
+
+    // Read matching G-buffer texels directly. Bilinear filtering blends
+    // foreground depth with the background at silhouettes and destabilizes
+    // reconstructed positions and cascade selection while the camera moves.
+    const int2 pixel = int2(input.pos.xy);
+    float4 packedAlbedo = GAlbedo.Load(int3(pixel, 0));
     float3 albedo = packedAlbedo.rgb;
     float metallic = packedAlbedo.a;
-    float4 packedNormal = GNormal.Sample(GSamp, input.uv);
+    float4 packedNormal = GNormal.Load(int3(pixel, 0));
     float3 normal = packedNormal.xyz;
     if (dot(normal, normal) < 1e-6f)
         return float4(albedo, 1.0f);
 
-    // SSAO affects only the indirect/ambient term. Direct point, spot and sun
-    // lighting remains bright even where a nearby corner blocks skylight.
-    // Full-screen target coordinates are vertically opposite to the G-buffer
-    // convention used by the existing lighting pass, so compensate here.
-    const float rawAo = AmbientOcclusion.Sample(GSamp, float2(input.uv.x, 1.0f - input.uv.y)).r;
-    if (InvScreen_pad.w > 0.5f)
-        return float4(rawAo.xxx, 1.0f);
-    const float ao = CameraPos_pad.w > 0.5f ? rawAo : 1.0f;
     const float roughness = clamp(packedNormal.w, 0.06f, 0.95f);
 
-    float depth = GDepth.Sample(GSamp, input.uv).r;
+    float depth = GDepth.Load(int3(pixel, 0)).r;
     float3 position = ReconstructWorldPosition(input.uv, depth);
     normal = normalize(normal);
     float3 viewDirection = normalize(CameraPos_pad.xyz - position);
@@ -238,34 +221,47 @@ float4 LightingPS(FsOut input) : SV_Target0
     float3 prefiltered = PreFilteredEnvMap.SampleLevel(GSamp, reflection, roughness * 11.0f).rgb;
     float2 brdf = IntegrationMap.Sample(GSamp, float2(nDotV, roughness)).rg;
     float3 specularIbl = prefiltered * (F * brdf.x + brdf.y);
-    float3 color = (kD * diffuseIbl + specularIbl) * ao;
+    float3 color = kD * diffuseIbl + specularIbl;
 
-    // Cascade is selected by camera-space distance. Splits are nonlinear: most
-    // shadow-map precision stays near the viewer.
-    float viewDepth = max(0.0f, dot(position - CameraPos_pad.xyz, CameraForward_shadowEnabled.xyz));
-    uint cascade = viewDepth < CascadeSplits.x ? 0 : viewDepth < CascadeSplits.y ? 1 : viewDepth < CascadeSplits.z ? 2 : 3;
+    // Select resolution by radial camera distance, not view-space depth. A
+    // camera yaw change then cannot switch a whole row of surfaces between
+    // different shadow maps while the camera position remains unchanged.
+    float cameraDistance = length(position - CameraPos_pad.xyz);
+    uint cascade = cameraDistance < CascadeSplits.x ? 0 : cameraDistance < CascadeSplits.y ? 1 : cameraDistance < CascadeSplits.z ? 2 : 3;
     float3 sunDirection = normalize(-Lights[2].direction_cosOuter.xyz);
     float rawShadow = ShadowPcf(cascade, position, normal, sunDirection);
+    if (CascadeColorDebug != 0)
+    {
+        static const float3 cascadeColors[4] = {
+            float3(1.0f, 0.15f, 0.15f), // nearest: red
+            float3(0.15f, 1.0f, 0.20f), // green
+            float3(0.15f, 0.45f, 1.0f), // blue
+            float3(1.0f, 0.80f, 0.10f)  // farthest: yellow
+        };
+        // This diagnostic shows the cascade selection only. Use U to inspect
+        // the shadow visibility itself, without a colour overlay.
+        return float4(cascadeColors[cascade], 1.0f);
+    }
     if (InvScreen_pad.z > 0.5f) return float4(rawShadow.xxx, 1.0f);
-    float sunShadow = CameraForward_shadowEnabled.w > 0.5f ? lerp(0.25f, 1.0f, rawShadow) : 1.0f;
+    // The shadow visibility is the actual directional-light multiplier.
+    // Keeping a forced 25% contribution made fully occluded regions appear lit.
+    float sunShadow = CameraForward_shadowEnabled.w > 0.5f ? rawShadow : 1.0f;
     color += EvaluateLight(Lights[0], albedo, metallic, roughness, normal, position, viewDirection);
-    color += EvaluateLight(Lights[1], albedo, metallic, roughness, normal, position, viewDirection);
+    float pointVisibility = CameraForward_shadowEnabled.w > 0.5f
+        ? PointShadowVisibility(position, normal, Lights[1]) : 1.0f;
+    color += EvaluateLight(Lights[1], albedo, metallic, roughness, normal, position, viewDirection) * pointVisibility;
     color += EvaluateLight(Lights[2], albedo, metallic, roughness, normal, position, viewDirection) * sunShadow;
 
-    int centerX = clamp((int)floor((position.x + 6.0f) / 2.0f), 0, 5);
-    int centerZ = clamp((int)floor((position.z + 5.0f) / 2.0f), 0, 4);
-    [unroll] for (int zOffset = -1; zOffset <= 1; ++zOffset)
-    [unroll] for (int xOffset = -1; xOffset <= 1; ++xOffset)
+    if (VignetteEnabled != 0)
     {
-        int x = centerX + xOffset, z = centerZ + zOffset;
-        if (x < 0 || x >= 6 || z < 0 || z >= 5) continue;
-        uint tile = z * 6 + x;
-        uint count = RainTileCounts[tile / 4][tile % 4];
-        [loop] for (uint index = 0; index < count; ++index)
-        {
-            uint lightIndex = RainTileLightIndices[(tile * 16 + index) / 4][(tile * 16 + index) % 4];
-            color += EvaluateLight(Lights[lightIndex], albedo, metallic, roughness, normal, position, viewDirection);
-        }
+        // Normalised distance from the screen centre. The X scale compensates
+        // for a non-square window so the darkening remains radially symmetric.
+        float2 centeredUv = (input.uv - 0.5f) * 2.0f;
+        centeredUv.x *= InvScreen_pad.y / max(InvScreen_pad.x, 1e-5f);
+        const float distanceFromCenter = length(centeredUv);
+        const float edgeDarkening = smoothstep(0.58f, 1.35f, distanceFromCenter);
+        color *= 1.0f - edgeDarkening * 0.45f;
     }
+
     return float4(color, 1.0f);
 }
