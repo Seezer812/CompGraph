@@ -100,6 +100,9 @@
     <None Include="LightingPass.hlsl">
       <Filter>Файлы ресурсов</Filter>
     </None>
+    <None Include="PostProcess.hlsl">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
     <None Include="ShadowPass.hlsl">
       <Filter>Файлы ресурсов</Filter>
     </None>

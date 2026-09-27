@@ -24,7 +24,8 @@ public:
         ID3D12DescriptorHeap* shaderVisibleSrvHeap,
         UINT gbufferSrvStartIndex,
         UINT srvDescriptorIncrement,
-        const wchar_t* deferredHlslPath);
+        const wchar_t* deferredHlslPath,
+        const wchar_t* postProcessHlslPath);
 
     void Resize(
         ID3D12Device* device,
@@ -51,6 +52,12 @@ public:
     void DrawLightingPass(
         ID3D12GraphicsCommandList* cmd,
         ID3D12DescriptorHeap* srvHeapShaderVisible,
+        UINT screenW,
+        UINT screenH);
+
+    void DrawPostProcessPass(
+        ID3D12GraphicsCommandList* cmd,
+        ID3D12DescriptorHeap* srvHeapShaderVisible,
         D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
         UINT screenW,
         UINT screenH);
@@ -63,17 +70,30 @@ public:
 
 private:
     void CreateLightingPipeline(ID3D12Device* device, const wchar_t* hlslPath);
+    void CreatePostProcessPipeline(ID3D12Device* device, const wchar_t* hlslPath);
+    void CreateLightingTarget(ID3D12Device* device, UINT width, UINT height);
+    void CreateLightingTargetSrv(ID3D12Device* device, ID3D12DescriptorHeap* srvHeap);
     void WriteDefaultLights();
 
     GBuffer m_gbuffer;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSigLight;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoLight;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSigPostProcess;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPostProcess;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_lightingCB;
     uint8_t* m_lightingCBMapped = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_postProcessCB;
+    uint8_t* m_postProcessCBMapped = nullptr;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_lightingTarget;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_lightingRtvHeap;
+    UINT m_lightingWidth = 0;
+    UINT m_lightingHeight = 0;
 
     UINT m_gbufferSrvBase = 0;
     UINT m_iblSrvBase = 0;
+    UINT m_postProcessSrvIndex = 0;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_iblTextures;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_iblUploads;
     UINT m_srvDescriptorIncrement = 0;

@@ -640,7 +640,8 @@ void DrawFrame(float dt)
     g_renderSys.UploadFrameConstants(
         g_camPos, camForward, viewProj, g_width, g_height, dt,
         cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView, g_cascadeColorDebug, g_vignetteEnabled, g_shadowMapDebugIndex);
-    g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
+    g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), g_width, g_height);
+    g_renderSys.DrawPostProcessPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
     DrawTopCamera(rtv, viewProj);
 
     D3D12_RESOURCE_BARRIER toPresent =
@@ -740,7 +741,8 @@ void InitD3D(HWND hwnd)
         g_srvHeap.Get(),
         kDeferredSrvBase,
         g_srvDescriptorSize,
-        AppPaths::LightingShaderFile().c_str());
+        AppPaths::LightingShaderFile().c_str(),
+        AppPaths::PostProcessShaderFile().c_str());
     g_shadowMap.Init(g_device.Get(), g_srvHeap.Get(), kShadowSrvBase, g_srvDescriptorSize);
     g_pointShadowMap.Init(g_device.Get(), g_srvHeap.Get(), kDeferredSrvBase + 10, g_srvDescriptorSize);
     if (!LoadScene())

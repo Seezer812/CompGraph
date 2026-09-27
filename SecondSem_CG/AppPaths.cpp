@@ -24,4 +24,9 @@ std::wstring LightingShaderFile()
 {
     return ExecutableDirectory() + L"LightingPass.hlsl";
 }
+
+std::wstring PostProcessShaderFile()
+{
+    return ExecutableDirectory() + L"PostProcess.hlsl";
+}
 } // namespace AppPaths

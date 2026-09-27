@@ -34,7 +34,7 @@ cbuffer LightingCB : register(b0)
     float4 CascadeSplits;
     row_major float4x4 CascadeMatrices[4];
     uint LightCount;
-    uint VignetteEnabled;
+    uint LightingPassPadding;
     uint ShadowMapDebugIndex;
     uint CascadeColorDebug;
     GpuLight Lights[3];
@@ -251,17 +251,6 @@ float4 LightingPS(FsOut input) : SV_Target0
         ? PointShadowVisibility(position, normal, Lights[1]) : 1.0f;
     color += EvaluateLight(Lights[1], albedo, metallic, roughness, normal, position, viewDirection) * pointVisibility;
     color += EvaluateLight(Lights[2], albedo, metallic, roughness, normal, position, viewDirection) * sunShadow;
-
-    if (VignetteEnabled != 0)
-    {
-        // Normalised distance from the screen centre. The X scale compensates
-        // for a non-square window so the darkening remains radially symmetric.
-        float2 centeredUv = (input.uv - 0.5f) * 2.0f;
-        centeredUv.x *= InvScreen_pad.y / max(InvScreen_pad.x, 1e-5f);
-        const float distanceFromCenter = length(centeredUv);
-        const float edgeDarkening = smoothstep(0.58f, 1.35f, distanceFromCenter);
-        color *= 1.0f - edgeDarkening * 0.45f;
-    }
 
     return float4(color, 1.0f);
 }
