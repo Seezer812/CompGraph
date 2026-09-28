@@ -6,5 +6,6 @@
 namespace ScenePaths
 {
 std::filesystem::path FindSponzaObj(const std::wstring& executableDirectory);
+std::filesystem::path FindCerberusObj(const std::wstring& executableDirectory);
 bool UsesAnimatedUv(const std::wstring& materialTexturePath);
 }

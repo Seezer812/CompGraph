@@ -40,7 +40,7 @@ public:
         const DirectX::XMMATRIX& viewProjection,
         UINT screenW,
         UINT screenH,
-        float deltaTime,
+        float elapsedTime,
         const std::array<DirectX::XMMATRIX, 4>& cascadeMatrices,
         const std::array<float, 4>& cascadeSplits,
         bool shadowsEnabled,

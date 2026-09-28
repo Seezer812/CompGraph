@@ -382,7 +382,7 @@ void RenderingSystem::UploadFrameConstants(
     const XMMATRIX& viewProjection,
     UINT screenW,
     UINT screenH,
-    float deltaTime,
+    float elapsedTime,
     const std::array<XMMATRIX, 4>& cascadeMatrices,
     const std::array<float, 4>& cascadeSplits,
     bool shadowsEnabled,
@@ -406,6 +406,15 @@ void RenderingSystem::UploadFrameConstants(
     cb->lightCount = kStaticLightCount;
     cb->shadowMapDebugIndex = shadowMapDebugIndex;
     cb->cascadeColorDebug = cascadeColorDebug ? 1u : 0u;
+
+    // The PBR showcase light follows a horizontal orbit around the model.
+    // Keep this position identical to the one used for the point-light cubemap.
+    LightGpu& orbitLight = cb->lights[1];
+    const float orbitAngle = elapsedTime * 0.75f;
+    orbitLight.type = LIGHT_POINT;
+    orbitLight.position_range = XMFLOAT4(cosf(orbitAngle) * 4.0f, -2.0f,
+        sinf(orbitAngle) * 4.0f, 12.0f);
+    orbitLight.color_intensity = XMFLOAT4(1.0f, 0.62f, 0.22f, 18.0f);
 
     auto* postProcessCb = reinterpret_cast<PostProcessCBGPU*>(m_postProcessCBMapped);
     postProcessCb->invScreen_pad = XMFLOAT4(iw, ih, 0.0f, 0.0f);

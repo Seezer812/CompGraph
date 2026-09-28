@@ -263,6 +263,33 @@ void SceneObjectRenderer::DrawDebugCube(ID3D12GraphicsCommandList* commandList, 
     commandList->DrawIndexedInstanced(m_cubeIndexCount, 1, 0, 0, 0);
 }
 
+void SceneObjectRenderer::DrawLightMarker(ID3D12GraphicsCommandList* commandList,
+    ID3D12DescriptorHeap* srvHeap, ID3D12RootSignature* rootSignature,
+    ID3D12PipelineState* pipelineState, const XMMATRIX& viewProjection,
+    const XMFLOAT3& cameraPosition, const XMFLOAT3& lightPosition, float timeSeconds)
+{
+    constexpr UINT kGeometrySlot = 10;
+    FrameConstants frame{};
+    XMStoreFloat4x4(&frame.world, XMMatrixScaling(0.16f, 0.16f, 0.16f) *
+        XMMatrixTranslation(lightPosition.x, lightPosition.y, lightPosition.z));
+    XMStoreFloat4x4(&frame.viewProjection, viewProjection);
+    frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z);
+    std::memcpy(m_markerConstantsMapped + static_cast<size_t>(kGeometrySlot) * kCbAlignment, &frame, sizeof(frame));
+
+    ID3D12DescriptorHeap* heaps[] = {srvHeap};
+    commandList->SetDescriptorHeaps(1, heaps);
+    commandList->SetGraphicsRootSignature(rootSignature);
+    commandList->SetPipelineState(pipelineState);
+    commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() +
+        static_cast<UINT64>(kGeometrySlot) * kCbAlignment);
+    commandList->SetGraphicsRootConstantBufferView(1, m_materialConstants->GetGPUVirtualAddress());
+    commandList->SetGraphicsRootDescriptorTable(2, srvHeap->GetGPUDescriptorHandleForHeapStart());
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList->IASetVertexBuffers(0, 1, &m_sphereVertexView);
+    commandList->IASetIndexBuffer(&m_sphereIndexView);
+    commandList->DrawIndexedInstanced(m_sphereIndexCount, 1, 0, 0, 0);
+}
+
 void SceneObjectRenderer::DrawDebugCubeShadow(ID3D12GraphicsCommandList* commandList,
     ID3D12RootSignature* shadowRootSignature, ID3D12PipelineState* shadowPipelineState,
     const XMMATRIX& lightViewProjection, UINT cascade)

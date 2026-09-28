@@ -58,6 +58,8 @@ public:
 
 private:
     bool m_ready = false;
+    bool m_isPbrModel = false;
+    DirectX::XMFLOAT4X4 m_world{};
     Obj::LoadedMesh m_mesh;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_vertexBuffer;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_indexBuffer;

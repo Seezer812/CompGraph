@@ -56,6 +56,16 @@ public:
         const DirectX::XMFLOAT3& cameraPosition,
         float timeSeconds);
 
+    void DrawLightMarker(
+        ID3D12GraphicsCommandList* commandList,
+        ID3D12DescriptorHeap* srvHeap,
+        ID3D12RootSignature* rootSignature,
+        ID3D12PipelineState* pipelineState,
+        const DirectX::XMMATRIX& viewProjection,
+        const DirectX::XMFLOAT3& cameraPosition,
+        const DirectX::XMFLOAT3& lightPosition,
+        float timeSeconds);
+
     void DrawDebugCubeShadow(
         ID3D12GraphicsCommandList* commandList,
         ID3D12RootSignature* shadowRootSignature,

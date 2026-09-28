@@ -6,31 +6,39 @@
 
 namespace ScenePaths
 {
-std::filesystem::path FindSponzaObj(const std::wstring& executableDirectory)
+namespace
 {
-    const std::wstring relatives[] = {L"Sponza\\sponza.obj", L"Sponza/sponza.obj", L"sponza.obj"};
+std::filesystem::path FindAsset(const std::wstring& executableDirectory,
+    const std::vector<std::filesystem::path>& relatives)
+{
     std::vector<std::filesystem::path> roots{std::filesystem::path(executableDirectory)};
     try { roots.push_back(std::filesystem::current_path()); } catch (...) {}
     const size_t originalCount = roots.size();
     for (size_t i = 0; i < originalCount; ++i)
-    {
-        // Для корня диска (например, D:\\) parent_path() возвращает тот же путь.
-        // Проверка следующего родителя предотвращает бесконечный цикл при старте.
         for (auto path = roots[i]; !path.empty();)
         {
-            if (std::find(roots.begin(), roots.end(), path) == roots.end())
-                roots.push_back(path);
-
-            const std::filesystem::path parent = path.parent_path();
-            if (parent == path)
-                break;
+            if (std::find(roots.begin(), roots.end(), path) == roots.end()) roots.push_back(path);
+            const auto parent = path.parent_path();
+            if (parent == path) break;
             path = parent;
         }
-    }
     for (const auto& root : roots)
         for (const auto& relative : relatives)
             if (const auto candidate = root / relative; std::filesystem::exists(candidate)) return candidate;
     return {};
+}
+}
+
+std::filesystem::path FindCerberusObj(const std::wstring& executableDirectory)
+{
+    return FindAsset(executableDirectory, {
+        L"assets/models/cerberus/Cerberus.obj",
+        L"models/cerberus/Cerberus.obj"});
+}
+
+std::filesystem::path FindSponzaObj(const std::wstring& executableDirectory)
+{
+    return FindAsset(executableDirectory, {L"Sponza/sponza.obj", L"sponza.obj"});
 }
 
 bool UsesAnimatedUv(const std::wstring& materialTexturePath)

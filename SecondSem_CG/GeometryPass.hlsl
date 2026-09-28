@@ -22,7 +22,8 @@ cbuffer MatCB : register(b1)
     uint HasNormalMap;
     uint HasDisplacementMap;
     uint EnableTessellation;
-    float _PadMat[46];
+    uint IsPbrMaterial;
+    float _PadMat[45];
 };
 
 Texture2D Albedo : register(t0);
@@ -131,8 +132,9 @@ GeoRtOut GeometryPS(GeoVsOut input)
     // Sponza has no reliable metalness map, so coloured, very strong specular
     // materials are the only ones treated as metals.
     const float specularStrength = HasSpecularTex ? dot(SpecMap.Sample(Samp, uv).rgb * Ks, 1.0f / 3.0f) : dot(Ks, 1.0f / 3.0f);
-    const float metallic = saturate((specularStrength - 0.55f) * 2.2f);
-    const float roughness = clamp(sqrt(2.0f / (Ns + 2.0f)), 0.06f, 0.95f);
+    const float metallic = IsPbrMaterial ? SpecMap.Sample(Samp, uv).r : saturate((specularStrength - 0.55f) * 2.2f);
+    const float roughness = IsPbrMaterial ? clamp(DisplacementMap.Sample(Samp, uv).r, 0.06f, 0.95f) :
+        clamp(sqrt(2.0f / (Ns + 2.0f)), 0.06f, 0.95f);
     output.albedo = float4(baseColor, metallic);
     float3 normalW = normalize(input.nrmW);
     if (HasNormalMap)

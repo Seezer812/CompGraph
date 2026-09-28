@@ -33,7 +33,8 @@ struct alignas(256) MaterialConstants
     XMFLOAT3 ks;
     float ns;
     UINT useUvAnimation, hasSpecularMap, isEmissive, hasNormalMap, hasDisplacementMap, enableTessellation;
-    float padding[46];
+    UINT isPbrMaterial;
+    float padding[45];
 };
 
 static_assert(sizeof(FrameConstants) == kCbAlignment);
@@ -69,6 +70,12 @@ bool SceneRenderer::Load(
     const std::filesystem::path& objPath)
 {
     m_ready = false;
+    m_isPbrModel = objPath.filename() == L"Cerberus.obj";
+    const XMMATRIX world = m_isPbrModel
+        ? XMMatrixTranslation(0.037364f, 0.142150f, 0.415043f) *
+            XMMatrixRotationX(XM_PI) * XMMatrixScaling(3.0f, 3.0f, 3.0f)
+        : XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI);
+    XMStoreFloat4x4(&m_world, world);
     m_textures.clear();
     m_materialSrvBase.clear();
     m_srvDescriptorSize = srvDescriptorSize;
@@ -88,7 +95,7 @@ bool SceneRenderer::Load(
     m_shadowCasterBoundsMin = XMFLOAT3(FLT_MAX, FLT_MAX, FLT_MAX);
     m_shadowCasterBoundsMax = XMFLOAT3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
     m_hasShadowCasterBounds = false;
-    const XMMATRIX sceneWorld = XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI);
+    const XMMATRIX sceneWorld = XMLoadFloat4x4(&m_world);
     for (const auto& submesh : m_mesh.submeshes)
     {
         if (submesh.materialIndex >= m_mesh.materials.size() ||
@@ -150,11 +157,16 @@ bool SceneRenderer::Load(
         const auto& material = m_mesh.materials[i]; m_materialSrvBase[i] = slot;
         const auto diffuse = Tex::ResolveTexturePathInTexturesFolder(materialDir, material.diffuseMapRel);
         bind(slot, diffuse, white.Get());
-        spec[i] = bind(slot + 1, Tex::ResolveTexturePathInTexturesFolder(materialDir, material.specularMapRel), white.Get());
+        const auto specularPath = m_isPbrModel ? materialDir / L"textures/Metallic.tga" :
+            Tex::ResolveTexturePathInTexturesFolder(materialDir, material.specularMapRel);
+        spec[i] = bind(slot + 1, specularPath, white.Get());
         std::wstring stem = diffuse.stem().wstring();
         if (stem.ends_with(L"_diff")) stem.resize(stem.size() - 5); else if (stem.ends_with(L"_dif")) stem.resize(stem.size() - 4);
-        normal[i] = bind(slot + 2, diffuse.parent_path() / (stem + L"_ddn.tga"), flatNormal.Get());
-        displacement[i] = bind(slot + 3, diffuse.parent_path() / (diffuse.stem().wstring() + L"_displacement.tga"), white.Get());
+        const auto normalPath = m_isPbrModel ? materialDir / L"textures/Normal.tga" : diffuse.parent_path() / (stem + L"_ddn.tga");
+        const auto fourthPath = m_isPbrModel ? materialDir / L"textures/Roughness.tga" :
+            diffuse.parent_path() / (diffuse.stem().wstring() + L"_displacement.tga");
+        normal[i] = bind(slot + 2, normalPath, flatNormal.Get());
+        displacement[i] = bind(slot + 3, fourthPath, white.Get());
     }
     if (FAILED(uploadCommands->Close()))
         return false;
@@ -197,6 +209,7 @@ bool SceneRenderer::Load(
             constants.kd = XMFLOAT4(material.Kd[0], material.Kd[1], material.Kd[2], 1); constants.uvScale = XMFLOAT2(material.uvScale[0], material.uvScale[1]); constants.uvOffset = XMFLOAT2(material.uvOffset[0], material.uvOffset[1]);
             constants.ks = XMFLOAT3(material.Ks[0], material.Ks[1], material.Ks[2]); constants.ns = material.Ns;
             constants.useUvAnimation = ScenePaths::UsesAnimatedUv(material.diffuseMapRel); constants.hasSpecularMap = spec[i]; constants.hasNormalMap = normal[i]; constants.hasDisplacementMap = displacement[i]; constants.enableTessellation = displacement[i] && IsTessellatedMaterial(material.name);
+            constants.isPbrMaterial = m_isPbrModel ? 1u : 0u;
         }
         std::memcpy(mapped + i * kCbAlignment, &constants, sizeof(constants));
     }
@@ -206,7 +219,7 @@ bool SceneRenderer::Load(
 void SceneRenderer::Draw(ID3D12GraphicsCommandList* commandList, ID3D12DescriptorHeap* srvHeap, ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState, const XMMATRIX& viewProjection, const XMFLOAT3& cameraPosition, float timeSeconds, bool tessellationEnabled) const
 {
     if (!m_ready) return;
-    FrameConstants frame{}; XMStoreFloat4x4(&frame.world, XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI)); XMStoreFloat4x4(&frame.viewProjection, viewProjection); frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z); frame.uvAnimation = XMFLOAT4(.035f, .022f, tessellationEnabled ? 1.f : 0.f, 0.f);
+    FrameConstants frame{}; frame.world = m_world; XMStoreFloat4x4(&frame.viewProjection, viewProjection); frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z); frame.uvAnimation = XMFLOAT4(.035f, .022f, tessellationEnabled ? 1.f : 0.f, 0.f);
     const UINT frameSlot = m_nextFrameConstantSlot++ % 4;
     std::memcpy(m_frameConstantsMapped + static_cast<size_t>(frameSlot) * kCbAlignment, &frame, sizeof(frame));
     ID3D12DescriptorHeap* heaps[] = {srvHeap}; commandList->SetDescriptorHeaps(1, heaps); commandList->SetGraphicsRootSignature(rootSignature); commandList->SetPipelineState(pipelineState); commandList->SetGraphicsRootConstantBufferView(0, m_frameConstants->GetGPUVirtualAddress() + static_cast<UINT64>(frameSlot) * kCbAlignment); commandList->IASetPrimitiveTopology(tessellationEnabled ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); commandList->IASetVertexBuffers(0, 1, &m_vertexView); commandList->IASetIndexBuffer(&m_indexView);
@@ -218,7 +231,7 @@ void SceneRenderer::DrawShadow(ID3D12GraphicsCommandList* commandList, ID3D12Roo
 {
     if (!m_ready) return;
     struct ShadowConstants { XMFLOAT4X4 world; XMFLOAT4X4 lightViewProjection; XMFLOAT4 lightPositionRange; } constants{};
-    XMStoreFloat4x4(&constants.world, XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI));
+    constants.world = m_world;
     XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
     const UINT shadowSlot = cascade % 4;
     std::memcpy(m_shadowConstantsMapped + static_cast<size_t>(shadowSlot) * kCbAlignment, &constants, sizeof(constants));
@@ -242,7 +255,7 @@ void SceneRenderer::DrawPointShadow(ID3D12GraphicsCommandList* commandList, ID3D
 {
     if (!m_ready || face >= 6) return;
     struct ShadowConstants { XMFLOAT4X4 world; XMFLOAT4X4 lightViewProjection; XMFLOAT4 lightPositionRange; } constants{};
-    XMStoreFloat4x4(&constants.world, XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI));
+    constants.world = m_world;
     XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
     constants.lightPositionRange = lightPositionRange;
     const UINT shadowSlot = 4 + face;

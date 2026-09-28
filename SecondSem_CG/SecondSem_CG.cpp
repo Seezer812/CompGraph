@@ -105,9 +105,9 @@ float g_appTime = 0.0f;
 
 // Sponza was rotated around X: its interior is toward negative Y, while the
 // floor is at y ≈ 1.26. The old y=1.4 spawn was consequently below the floor.
-XMFLOAT3 g_camPos{0.0f, -0.5f, 4.5f};
-float g_camYaw = -XM_PIDIV2; // Spawn looking 90 degrees left, toward -X.
-float g_camPitch = -0.12f;
+XMFLOAT3 g_camPos{5.2f, -0.3f, 0.0f};
+float g_camYaw = -XM_PIDIV2;
+float g_camPitch = 0.0f;
 bool g_camPrevRmb = false;
 // Sponza содержит много треугольников, поэтому тесселяция включается вручную клавишей T.
 // Так первый кадр гарантированно появляется даже на встроенной видеокарте.
@@ -345,7 +345,7 @@ void CreateGeometryPipeline()
 
 bool LoadScene()
 {
-    const std::filesystem::path objPath = ScenePaths::FindSponzaObj(AppPaths::ExecutableDirectory());
+    const std::filesystem::path objPath = ScenePaths::FindCerberusObj(AppPaths::ExecutableDirectory());
     if (objPath.empty())
         return false;
     return g_sceneRenderer.Load(
@@ -353,8 +353,13 @@ bool LoadScene()
         g_srvHeap.Get(), g_srvDescriptorSize, objPath) &&
         g_renderSys.LoadIbl(g_device.Get(), g_queue.Get(), g_cmdAlloc[0].Get(), g_cmdList.Get(),
             g_srvHeap.Get(), AppPaths::ExecutableDirectory() + L"\\assets\\ibl",
-            objPath.parent_path() / L"textures") &&
-        g_waveWallRenderer.Initialize(g_device.Get());
+            AppPaths::ExecutableDirectory() + L"\\assets\\cascade_debug");
+}
+
+XMFLOAT4 OrbitingPointLight(float timeSeconds)
+{
+    const float angle = timeSeconds * 0.75f;
+    return XMFLOAT4(cosf(angle) * 4.0f, -2.0f, sinf(angle) * 4.0f, 12.0f);
 }
 
 void DrawScene(const XMMATRIX& viewProj)
@@ -367,10 +372,6 @@ void DrawScene(const XMMATRIX& viewProj)
     g_sceneRenderer.Draw(
         g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), pipeline,
         viewProj, g_camPos, g_appTime, g_tessellationEnabled);
-    g_waveWallRenderer.Draw(
-        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(),
-        g_wireframeEnabled ? g_pipelineWaveWallWire.Get() : g_pipelineWaveWall.Get(),
-        viewProj, g_appTime);
 }
 
 XMMATRIX TopCameraViewProjection()
@@ -553,7 +554,7 @@ void DrawFrame(float dt)
     const XMMATRIX viewProj = Camera::ViewProjection(g_camPos, g_camYaw, g_camPitch, g_width, g_height);
     const auto cascadeSplits = CascadeSplits();
     const auto cascadeMatrices = CascadeMatrices();
-    constexpr XMFLOAT4 pointLightPositionRange{0.0f, -4.5f, 2.0f, 22.0f};
+    const XMFLOAT4 pointLightPositionRange = OrbitingPointLight(g_appTime);
     const auto pointMatrices = PointShadowMatrices(
         XMFLOAT3(pointLightPositionRange.x, pointLightPositionRange.y, pointLightPositionRange.z),
         pointLightPositionRange.w);
@@ -575,7 +576,6 @@ void DrawFrame(float dt)
             g_cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
             g_cmdList->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
             g_sceneRenderer.DrawShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_shadowPipeline.Get(), cascadeMatrices[cascade], cascade);
-            g_sceneObjectRenderer.DrawDebugCubeShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_shadowPipeline.Get(), cascadeMatrices[cascade], cascade);
         }
         g_shadowMap.TransitionToShaderResource(g_cmdList.Get());
 
@@ -597,8 +597,6 @@ void DrawFrame(float dt)
             g_cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
             g_sceneRenderer.DrawPointShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_pointShadowPipeline.Get(),
                 pointMatrices[face], face, pointLightPositionRange);
-            g_sceneObjectRenderer.DrawDebugCubePointShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_pointShadowPipeline.Get(),
-                pointMatrices[face], face, pointLightPositionRange);
         }
         g_pointShadowMap.TransitionToShaderResource(g_cmdList.Get());
     }
@@ -618,13 +616,10 @@ void DrawFrame(float dt)
     g_cmdList->RSSetScissorRects(1, &scissor);
 
     DrawScene(viewProj);
-    g_sceneObjectRenderer.Draw(
+    g_sceneObjectRenderer.DrawLightMarker(
         g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineGeoMarker.Get(),
-        viewProj, g_camPos, g_appTime, g_frustumCullingEnabled,
-        true, g_cullingStats);
-    g_sceneObjectRenderer.DrawDebugCube(
-        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineGeoMarker.Get(),
-        viewProj, g_camPos, g_appTime);
+        viewProj, g_camPos,
+        XMFLOAT3(pointLightPositionRange.x, pointLightPositionRange.y, pointLightPositionRange.z), g_appTime);
     UpdateWindowTitle();
 
     gb.TransitionToShaderResource(g_cmdList.Get());
@@ -641,12 +636,11 @@ void DrawFrame(float dt)
     XMFLOAT3 camForward{};
     XMStoreFloat3(&camForward, Camera::Forward(g_camYaw, g_camPitch));
     g_renderSys.UploadFrameConstants(
-        g_camPos, camForward, viewProj, g_width, g_height, dt,
+        g_camPos, camForward, viewProj, g_width, g_height, g_appTime,
         cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView, g_cascadeColorDebug,
         g_vignetteEnabled, g_flyEyeEnabled, g_shadowMapDebugIndex);
     g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), g_width, g_height);
     g_renderSys.DrawPostProcessPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
-    DrawTopCamera(rtv, viewProj);
 
     D3D12_RESOURCE_BARRIER toPresent =
         D3DHelpers::Transition(backBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -753,7 +747,7 @@ void InitD3D(HWND hwnd)
     {
         MessageBoxW(
             hwnd,
-            L"Не удалось загрузить сцену Sponza. Проверьте наличие папки Sponza, файла sponza.obj и текстур рядом с исполняемым файлом.",
+            L"Не удалось загрузить PBR-модель Cerberus из assets/models/cerberus.",
             L"SecondSem CG — ошибка загрузки сцены",
             MB_OK | MB_ICONERROR);
         std::exit(EXIT_FAILURE);
