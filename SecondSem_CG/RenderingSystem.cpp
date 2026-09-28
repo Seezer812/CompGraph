@@ -143,7 +143,7 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
 {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 11; // G-buffer, four CSM maps, three IBL maps and point-light cubemap.
+    range.NumDescriptors = 15; // G-buffer, CSM, IBL, point shadow and four cascade debug textures.
     range.BaseShaderRegister = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -327,7 +327,8 @@ void RenderingSystem::Init(
 {
     m_gbufferSrvBase = gbufferSrvStartIndex;
     m_iblSrvBase = gbufferSrvStartIndex + 7;
-    m_postProcessSrvIndex = gbufferSrvStartIndex + 11;
+    m_cascadeTextureSrvBase = gbufferSrvStartIndex + 11;
+    m_postProcessSrvIndex = gbufferSrvStartIndex + 15;
     m_srvDescriptorIncrement = srvDescriptorIncrement;
 
     m_gbuffer.Init(device, width, height);
@@ -425,7 +426,8 @@ void RenderingSystem::UploadFrameConstants(
 
 bool RenderingSystem::LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
     ID3D12CommandAllocator* uploadAllocator, ID3D12GraphicsCommandList* uploadCommands,
-    ID3D12DescriptorHeap* srvHeap, const std::filesystem::path& assetDirectory)
+    ID3D12DescriptorHeap* srvHeap, const std::filesystem::path& assetDirectory,
+    const std::filesystem::path& cascadeTextureDirectory)
 {
     m_iblTextures.clear(); m_iblUploads.clear();
     if (FAILED(uploadAllocator->Reset()) || FAILED(uploadCommands->Reset(uploadAllocator, nullptr))) return false;
@@ -437,6 +439,19 @@ bool RenderingSystem::LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
         !Tex::CreateTextureFromDds(device, uploadCommands, srvHeap, m_iblSrvBase + 2, m_srvDescriptorIncrement,
             assetDirectory / L"IntegrationMap.dds", false, integration, m_iblUploads, error)) {
         MessageBoxW(nullptr, error.c_str(), L"IBL asset load", MB_OK | MB_ICONERROR); return false;
+    }
+    for (UINT cascade = 0; cascade < m_cascadeTextures.size(); ++cascade)
+    {
+        const std::filesystem::path path =
+            cascadeTextureDirectory / (L"cascade_" + std::to_wstring(cascade) + L".jpg");
+        if (!Tex::CreateTexture2DFromFile(
+                device, uploadCommands, srvHeap, m_cascadeTextureSrvBase + cascade,
+                m_srvDescriptorIncrement, path, m_cascadeTextures[cascade], m_iblUploads, error))
+        {
+            const std::wstring message = L"Failed to load cascade texture:\n" + path.wstring() + L"\n" + error;
+            MessageBoxW(nullptr, message.c_str(), L"Cascade texture load", MB_OK | MB_ICONERROR);
+            return false;
+        }
     }
     if (FAILED(uploadCommands->Close())) return false;
     ID3D12CommandList* lists[] = {uploadCommands}; queue->ExecuteCommandLists(1, lists);

@@ -8,6 +8,7 @@ TextureCube IrradianceMap : register(t7);
 TextureCube PreFilteredEnvMap : register(t8);
 Texture2D IntegrationMap : register(t9);
 TextureCube PointShadowMap : register(t10);
+Texture2D CascadeDebugTextures[4] : register(t11);
 SamplerState GSamp : register(s0);
 SamplerComparisonState ShadowSamp : register(s1);
 
@@ -56,6 +57,15 @@ float SampleShadowMapDepth(uint mapIndex, float2 uv)
     if (mapIndex == 2) return ShadowMaps[1].Sample(GSamp, uv).r;
     if (mapIndex == 3) return ShadowMaps[2].Sample(GSamp, uv).r;
     return ShadowMaps[3].Sample(GSamp, uv).r;
+}
+
+float4 SampleCascadeDebugTexture(uint cascade, float2 uv)
+{
+    // Shader Model 5 requires literal resource-array indices for sampling.
+    if (cascade == 0) return CascadeDebugTextures[0].Sample(GSamp, uv);
+    if (cascade == 1) return CascadeDebugTextures[1].Sample(GSamp, uv);
+    if (cascade == 2) return CascadeDebugTextures[2].Sample(GSamp, uv);
+    return CascadeDebugTextures[3].Sample(GSamp, uv);
 }
 
 float ShadowPcf(uint cascade, float3 position, float3 normal, float3 lightDirection)
@@ -210,6 +220,19 @@ float4 LightingPS(FsOut input) : SV_Target0
     float depth = GDepth.Load(int3(pixel, 0)).r;
     float3 position = ReconstructWorldPosition(input.uv, depth);
     normal = normalize(normal);
+
+    // Cascades are selected by radial camera distance. In visualization mode
+    // each cascade supplies the material for horizontal floor surfaces only;
+    // the rest of Sponza keeps its original materials.
+    float cameraDistance = length(position - CameraPos_pad.xyz);
+    uint cascade = cameraDistance < CascadeSplits.x ? 0 : cameraDistance < CascadeSplits.y ? 1 : cameraDistance < CascadeSplits.z ? 2 : 3;
+    if (CascadeColorDebug != 0 && abs(normal.y) > 0.82f)
+    {
+        const float2 floorUv = frac(position.xz * 0.08f);
+        albedo = SampleCascadeDebugTexture(cascade, floorUv).rgb;
+        metallic = 0.0f;
+    }
+
     float3 viewDirection = normalize(CameraPos_pad.xyz - position);
     float nDotV = saturate(dot(normal, viewDirection));
     float3 f0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
@@ -223,25 +246,8 @@ float4 LightingPS(FsOut input) : SV_Target0
     float3 specularIbl = prefiltered * (F * brdf.x + brdf.y);
     float3 color = kD * diffuseIbl + specularIbl;
 
-    // Select resolution by radial camera distance, not view-space depth. A
-    // camera yaw change then cannot switch a whole row of surfaces between
-    // different shadow maps while the camera position remains unchanged.
-    float cameraDistance = length(position - CameraPos_pad.xyz);
-    uint cascade = cameraDistance < CascadeSplits.x ? 0 : cameraDistance < CascadeSplits.y ? 1 : cameraDistance < CascadeSplits.z ? 2 : 3;
     float3 sunDirection = normalize(-Lights[2].direction_cosOuter.xyz);
     float rawShadow = ShadowPcf(cascade, position, normal, sunDirection);
-    if (CascadeColorDebug != 0)
-    {
-        static const float3 cascadeColors[4] = {
-            float3(1.0f, 0.15f, 0.15f), // nearest: red
-            float3(0.15f, 1.0f, 0.20f), // green
-            float3(0.15f, 0.45f, 1.0f), // blue
-            float3(1.0f, 0.80f, 0.10f)  // farthest: yellow
-        };
-        // This diagnostic shows the cascade selection only. Use U to inspect
-        // the shadow visibility itself, without a colour overlay.
-        return float4(cascadeColors[cascade], 1.0f);
-    }
     if (InvScreen_pad.z > 0.5f) return float4(rawShadow.xxx, 1.0f);
     // The shadow visibility is the actual directional-light multiplier.
     // Keeping a forced 25% contribution made fully occluded regions appear lit.

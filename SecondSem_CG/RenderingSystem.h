@@ -64,7 +64,8 @@ public:
 
     bool LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
         ID3D12CommandAllocator* uploadAllocator, ID3D12GraphicsCommandList* uploadCommands,
-        ID3D12DescriptorHeap* srvHeap, const std::filesystem::path& assetDirectory);
+        ID3D12DescriptorHeap* srvHeap, const std::filesystem::path& assetDirectory,
+        const std::filesystem::path& cascadeTextureDirectory);
 
     GBuffer& GBufferTargets() { return m_gbuffer; }
 
@@ -93,8 +94,10 @@ private:
 
     UINT m_gbufferSrvBase = 0;
     UINT m_iblSrvBase = 0;
+    UINT m_cascadeTextureSrvBase = 0;
     UINT m_postProcessSrvIndex = 0;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_iblTextures;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_iblUploads;
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, 4> m_cascadeTextures;
     UINT m_srvDescriptorIncrement = 0;
 };
