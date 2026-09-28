@@ -47,6 +47,7 @@ public:
         bool shadowDebugView,
         bool cascadeColorDebug,
         bool vignetteEnabled,
+        bool flyEyeEnabled,
         UINT shadowMapDebugIndex);
 
     void DrawLightingPass(

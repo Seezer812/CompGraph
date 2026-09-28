@@ -64,7 +64,8 @@ struct PostProcessCBGPU
 {
     XMFLOAT4 invScreen_pad{};
     UINT vignetteEnabled = 0;
-    UINT pad[3]{};
+    UINT flyEyeEnabled = 0;
+    UINT pad[2]{};
 };
 
 static_assert(sizeof(PostProcessCBGPU) == 32);
@@ -388,6 +389,7 @@ void RenderingSystem::UploadFrameConstants(
     bool shadowDebugView,
     bool cascadeColorDebug,
     bool vignetteEnabled,
+    bool flyEyeEnabled,
     UINT shadowMapDebugIndex)
 {
     auto* cb = reinterpret_cast<LightingCBGPU*>(m_lightingCBMapped);
@@ -409,6 +411,7 @@ void RenderingSystem::UploadFrameConstants(
     postProcessCb->invScreen_pad = XMFLOAT4(iw, ih, 0.0f, 0.0f);
     postProcessCb->vignetteEnabled = vignetteEnabled && !shadowDebugView &&
         !cascadeColorDebug && shadowMapDebugIndex == 0 ? 1u : 0u;
+    postProcessCb->flyEyeEnabled = flyEyeEnabled ? 1u : 0u;
 
     const XMVECTOR axis = XMVector3Normalize(XMLoadFloat3(&cameraForward));
     const XMVECTOR eye = XMLoadFloat3(&cameraPos);

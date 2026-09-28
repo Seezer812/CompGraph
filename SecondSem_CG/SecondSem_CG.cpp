@@ -118,6 +118,7 @@ bool g_shadowsEnabled = true;
 bool g_shadowDebugView = false;
 bool g_cascadeColorDebug = false;
 bool g_vignetteEnabled = true;
+bool g_flyEyeEnabled = false;
 UINT g_shadowMapDebugIndex = 0;
 SpatialCulling::Stats g_cullingStats{};
 
@@ -180,7 +181,8 @@ void UpdateWindowTitle()
     wchar_t title[320]{};
     swprintf_s(
         title,
-        L"SecondSem CG | Y: CSM %s | U: CSM result %s | I: cascades %s | 1-4: texture %u | 0: scene | V: vignette %s | T: tessellation %s | R: edges %s | F: culling %s | objects: %u/2000",
+        L"SecondSem CG | H: fly eye %s | Y: CSM %s | U: CSM result %s | I: cascades %s | 1-4: texture %u | 0: scene | V: vignette %s | T: tessellation %s | R: edges %s | F: culling %s | objects: %u/2000",
+        g_flyEyeEnabled ? L"ON" : L"OFF",
         g_shadowsEnabled ? L"ON" : L"OFF",
         g_shadowDebugView ? L"ON" : L"OFF",
         g_cascadeColorDebug ? L"ON" : L"OFF",
@@ -640,7 +642,8 @@ void DrawFrame(float dt)
     XMStoreFloat3(&camForward, Camera::Forward(g_camYaw, g_camPitch));
     g_renderSys.UploadFrameConstants(
         g_camPos, camForward, viewProj, g_width, g_height, dt,
-        cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView, g_cascadeColorDebug, g_vignetteEnabled, g_shadowMapDebugIndex);
+        cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView, g_cascadeColorDebug,
+        g_vignetteEnabled, g_flyEyeEnabled, g_shadowMapDebugIndex);
     g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), g_width, g_height);
     g_renderSys.DrawPostProcessPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
     DrawTopCamera(rtv, viewProj);
@@ -802,6 +805,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (wp == 'V' && (lp & (1ll << 30)) == 0)
         {
             g_vignetteEnabled = !g_vignetteEnabled;
+            UpdateWindowTitle();
+        }
+        else if (wp == 'H' && (lp & (1ll << 30)) == 0)
+        {
+            g_flyEyeEnabled = !g_flyEyeEnabled;
             UpdateWindowTitle();
         }
         else if (wp >= '1' && wp <= '4' && (lp & (1ll << 30)) == 0)

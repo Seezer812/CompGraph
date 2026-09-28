@@ -8,7 +8,8 @@ cbuffer PostProcessCB : register(b0)
 {
     float4 InvScreen_pad;
     uint VignetteEnabled;
-    float3 Padding;
+    uint FlyEyeEnabled;
+    float2 Padding;
 };
 
 struct FsOut
@@ -30,7 +31,56 @@ FsOut PostProcessFullscreenVS(uint vertexId : SV_VertexID)
 
 float4 PostProcessPS(FsOut input) : SV_Target0
 {
-    float3 color = SceneColor.SampleLevel(LinearClampSampler, input.uv, 0).rgb;
+    float2 sceneUv = input.uv;
+    float facetMask = 1.0f;
+
+    if (FlyEyeEnabled != 0)
+    {
+        // Pointy-top hexagonal grid in pixel space.  Axial cube rounding finds
+        // the nearest facet centre without discontinuities between rows.
+        const float hexRadius = 82.0f;
+        const float sqrt3 = 1.73205080757f;
+        float2 pixel = input.uv / InvScreen_pad.xy;
+        float axialR = (2.0f / 3.0f) * pixel.y / hexRadius;
+        float axialQ = (sqrt3 / 3.0f * pixel.x - pixel.y / 3.0f) / hexRadius;
+
+        float3 cube = float3(axialQ, -axialQ - axialR, axialR);
+        float3 roundedCube = round(cube);
+        float3 cubeError = abs(roundedCube - cube);
+        if (cubeError.x > cubeError.y && cubeError.x > cubeError.z)
+            roundedCube.x = -roundedCube.y - roundedCube.z;
+        else if (cubeError.y > cubeError.z)
+            roundedCube.y = -roundedCube.x - roundedCube.z;
+        else
+            roundedCube.z = -roundedCube.x - roundedCube.y;
+
+        float2 center = float2(
+            hexRadius * sqrt3 * (roundedCube.x + 0.5f * roundedCube.z),
+            hexRadius * 1.5f * roundedCube.z);
+        float2 local = pixel - center;
+
+        // Every facet maps its complete bounding box back to the full scene.
+        sceneUv = float2(
+            local.x / (sqrt3 * hexRadius) + 0.5f,
+            local.y / (2.0f * hexRadius) + 0.5f);
+        sceneUv = saturate(sceneUv);
+
+        // Exact pointy-top regular hexagon: one pair of vertical sides and
+        // two pairs of diagonal sides.  Both terms equal one on the border.
+        float2 absoluteLocal = abs(local);
+        float verticalSides = absoluteLocal.x / (0.5f * sqrt3 * hexRadius);
+        float diagonalSides = absoluteLocal.x / (sqrt3 * hexRadius)
+            + absoluteLocal.y / hexRadius;
+        float hexDistance = max(verticalSides, diagonalSides);
+
+        // Keep a visible black seam, with derivative-based antialiasing on
+        // every one of the six straight edges.
+        float borderWidth = max(fwidth(hexDistance) * 1.5f, 0.012f);
+        facetMask = 1.0f - smoothstep(0.92f - borderWidth, 0.92f, hexDistance);
+    }
+
+    float3 color = SceneColor.SampleLevel(LinearClampSampler, sceneUv, 0).rgb;
+    color *= facetMask;
 
     if (VignetteEnabled != 0)
     {
