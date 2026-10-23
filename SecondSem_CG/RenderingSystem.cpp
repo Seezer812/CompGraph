@@ -1,4 +1,5 @@
 #include "RenderingSystem.h"
+#include "D3D12Context.h"
 #include "D3DHelpers.h"
 #include "TextureUtil.h"
 
@@ -13,6 +14,8 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <cmath>
+#include <stdexcept>
 
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -25,11 +28,10 @@ namespace
 enum LightType : UINT
 {
     LIGHT_DIR = 0,
-    LIGHT_POINT = 1,
-    LIGHT_SPOT = 2,
 };
 
-constexpr UINT kStaticLightCount = 3;
+constexpr UINT kLightingCbStride = 512;
+constexpr UINT kPostProcessCbStride = 256;
 
 struct LightGpu
 {
@@ -48,27 +50,30 @@ struct LightingCBGPU
     XMFLOAT4 cameraPos_pad{};
     XMFLOAT4 invScreen_pad{};
     XMFLOAT4X4 inverseViewProjection{};
-    XMFLOAT4 cameraForward_shadowEnabled{};
+    XMFLOAT4 shadowSettings{}; // x: environment max LOD, w: shadows enabled
     XMFLOAT4 cascadeSplits{};
     XMFLOAT4X4 cascadeMatrices[4]{};
     UINT lightCount = 0;
-    UINT lightingPassPadding = 0;
+    UINT tileCountX = 0;
     UINT shadowMapDebugIndex = 0;
     UINT cascadeColorDebug = 0;
-    LightGpu lights[kStaticLightCount]{};
+    LightGpu sun{};
 };
 
-static_assert(sizeof(LightingCBGPU) == 592);
+static_assert(sizeof(LightingCBGPU) == 464);
+static_assert(kLightingCbStride >= sizeof(LightingCBGPU) && kLightingCbStride % 256 == 0);
 
 struct PostProcessCBGPU
 {
     XMFLOAT4 invScreen_pad{};
     UINT vignetteEnabled = 0;
     UINT flyEyeEnabled = 0;
-    UINT pad[2]{};
+    UINT toneMappingEnabled = 1;
+    UINT pad = 0;
 };
 
 static_assert(sizeof(PostProcessCBGPU) == 32);
+static_assert(kPostProcessCbStride >= sizeof(PostProcessCBGPU) && kPostProcessCbStride % 256 == 0);
 
 void RSCompile(const wchar_t* path, const char* entry, const char* target, ComPtr<ID3DBlob>& out)
 {
@@ -119,25 +124,14 @@ static ComPtr<ID3D12Resource> CreateUploadCb(ID3D12Device* device, UINT64 size)
 void RenderingSystem::WriteDefaultLights()
 {
     LightingCBGPU cb{};
-    cb.lightCount = kStaticLightCount;
+    XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(0.18f, -0.96f, -0.22f, 0.f));
+    cb.sun.type = LIGHT_DIR;
+    XMStoreFloat4(&cb.sun.direction_cosOuter, sunDir);
+    cb.sun.direction_cosOuter.w = 0.f;
+    cb.sun.color_intensity = XMFLOAT4(1.0f, 0.93f, 0.80f, 7.0f);
 
-    cb.lights[1].type = LIGHT_POINT;
-    // Negative Y is upward in the transformed Sponza coordinate system.
-    cb.lights[1].position_range = XMFLOAT4(0.f, -4.5f, 2.f, 22.f);
-    cb.lights[1].color_intensity = XMFLOAT4(0.12f, 1.f, 0.82f, 5.5f);
-  
-
-    // Sponza is rotated by 180 degrees around X, so its local "up" points
-    // toward negative world Y.  Positive ray Y places the source above its hall.
-    // Equivalent to the working reference scene after Sponza's X-axis flip:
-    // mostly top-down light with a small lateral component.
-    XMVECTOR sunDir = XMVector3Normalize(XMVectorSet(0.18f, 0.96f, -0.22f, 0.f));
-    cb.lights[2].type = LIGHT_DIR;
-    XMStoreFloat4(&cb.lights[2].direction_cosOuter, sunDir);
-    cb.lights[2].direction_cosOuter.w = 0.f;
-    cb.lights[2].color_intensity = XMFLOAT4(1.0f, 0.93f, 0.80f, 7.0f);
-
-    std::memcpy(m_lightingCBMapped, &cb, sizeof(cb));
+    for (UINT frame = 0; frame < D3D12Context::FrameCount; ++frame)
+        std::memcpy(m_lightingCBMapped + frame * kLightingCbStride, &cb, sizeof(cb));
 }
 
 void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t* hlslPath)
@@ -148,7 +142,7 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
     range.BaseShaderRegister = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    D3D12_ROOT_PARAMETER params[2]{};
+    D3D12_ROOT_PARAMETER params[5]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -158,11 +152,20 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
     params[1].DescriptorTable.pDescriptorRanges = &range;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // Root SRVs avoid rewriting descriptors that an in-flight frame uses.
+    for (UINT i = 2; i < 5; ++i)
+    {
+        params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[i].Descriptor.ShaderRegister = 15 + i - 2;
+        params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+
     D3D12_STATIC_SAMPLER_DESC samp{};
     samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     samp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     samp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.MaxLOD = D3D12_FLOAT32_MAX;
     samp.ShaderRegister = 0;
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
@@ -174,7 +177,7 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
     shadowSamp.ShaderRegister = 1;
 
     D3D12_ROOT_SIGNATURE_DESC rs{};
-    rs.NumParameters = 2;
+    rs.NumParameters = _countof(params);
     rs.pParameters = params;
     D3D12_STATIC_SAMPLER_DESC samplers[] = {samp, shadowSamp};
     rs.NumStaticSamplers = 2;
@@ -205,7 +208,7 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
     pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.NumRenderTargets = 1;
-    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     pso.SampleDesc.Count = 1;
     pso.InputLayout.NumElements = 0;
     pso.InputLayout.pInputElementDescs = nullptr;
@@ -287,7 +290,7 @@ void RenderingSystem::CreateLightingTarget(ID3D12Device* device, UINT width, UIN
     desc.Height = height;
     desc.DepthOrArraySize = 1;
     desc.MipLevels = 1;
-    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     desc.SampleDesc.Count = 1;
     desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     D3D12_CLEAR_VALUE clear{};
@@ -307,7 +310,7 @@ void RenderingSystem::CreateLightingTarget(ID3D12Device* device, UINT width, UIN
 void RenderingSystem::CreateLightingTargetSrv(ID3D12Device* device, ID3D12DescriptorHeap* srvHeap)
 {
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Texture2D.MipLevels = 1;
@@ -326,6 +329,7 @@ void RenderingSystem::Init(
     const wchar_t* deferredHlslPath,
     const wchar_t* postProcessHlslPath)
 {
+    m_device = device;
     m_gbufferSrvBase = gbufferSrvStartIndex;
     m_iblSrvBase = gbufferSrvStartIndex + 7;
     m_cascadeTextureSrvBase = gbufferSrvStartIndex + 11;
@@ -347,13 +351,13 @@ void RenderingSystem::Init(
     CreateLightingTarget(device, width, height);
     CreateLightingTargetSrv(device, shaderVisibleSrvHeap);
 
-    m_lightingCB = CreateUploadCb(device, sizeof(LightingCBGPU));
+    m_lightingCB = CreateUploadCb(device, D3D12Context::FrameCount * kLightingCbStride);
     D3D12_RANGE rr{0, 0};
     hr = m_lightingCB->Map(0, &rr, reinterpret_cast<void**>(&m_lightingCBMapped));
     if (FAILED(hr))
         std::exit(static_cast<int>(hr));
 
-    m_postProcessCB = CreateUploadCb(device, 256);
+    m_postProcessCB = CreateUploadCb(device, D3D12Context::FrameCount * kPostProcessCbStride);
     hr = m_postProcessCB->Map(0, &rr, reinterpret_cast<void**>(&m_postProcessCBMapped));
     if (FAILED(hr)) std::exit(static_cast<int>(hr));
 
@@ -378,11 +382,9 @@ void RenderingSystem::Resize(
 
 void RenderingSystem::UploadFrameConstants(
     const XMFLOAT3& cameraPos,
-    const XMFLOAT3& cameraForward,
     const XMMATRIX& viewProjection,
     UINT screenW,
     UINT screenH,
-    float elapsedTime,
     const std::array<XMMATRIX, 4>& cascadeMatrices,
     const std::array<float, 4>& cascadeSplits,
     bool shadowsEnabled,
@@ -392,48 +394,75 @@ void RenderingSystem::UploadFrameConstants(
     bool flyEyeEnabled,
     UINT shadowMapDebugIndex)
 {
-    auto* cb = reinterpret_cast<LightingCBGPU*>(m_lightingCBMapped);
+    auto* cb = reinterpret_cast<LightingCBGPU*>(m_lightingCBMapped + m_frameIndex * kLightingCbStride);
     cb->cameraPos_pad = XMFLOAT4(cameraPos.x, cameraPos.y, cameraPos.z, 0.0f);
     const float iw = screenW > 0 ? 1.f / static_cast<float>(screenW) : 1.f;
     const float ih = screenH > 0 ? 1.f / static_cast<float>(screenH) : 1.f;
     cb->invScreen_pad = XMFLOAT4(iw, ih, shadowDebugView ? 1.0f : 0.0f, 0.0f);
     XMStoreFloat4x4(&cb->inverseViewProjection, XMMatrixInverse(nullptr, viewProjection));
-    cb->cameraForward_shadowEnabled = XMFLOAT4(cameraForward.x, cameraForward.y, cameraForward.z, shadowsEnabled ? 1.0f : 0.0f);
+    cb->shadowSettings = XMFLOAT4(m_environmentMaxLod, 0, 0, shadowsEnabled ? 1.0f : 0.0f);
     cb->cascadeSplits = XMFLOAT4(cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3]);
     for (UINT i = 0; i < 4; ++i)
         XMStoreFloat4x4(&cb->cascadeMatrices[i], cascadeMatrices[i]);
 
-    cb->lightCount = kStaticLightCount;
+    UploadLightTiles(viewProjection, screenW, screenH);
+    cb->lightCount = static_cast<UINT>(m_pointLights.size());
+    cb->tileCountX = (screenW + LightTiling::TileSize - 1) / LightTiling::TileSize;
     cb->shadowMapDebugIndex = shadowMapDebugIndex;
     cb->cascadeColorDebug = cascadeColorDebug ? 1u : 0u;
-
-    // The PBR showcase light follows a horizontal orbit around the model.
-    // Keep this position identical to the one used for the point-light cubemap.
-    LightGpu& orbitLight = cb->lights[1];
-    const float orbitAngle = elapsedTime * 0.75f;
-    orbitLight.type = LIGHT_POINT;
-    orbitLight.position_range = XMFLOAT4(cosf(orbitAngle) * 4.0f, -2.0f,
-        sinf(orbitAngle) * 4.0f, 12.0f);
-    orbitLight.color_intensity = XMFLOAT4(1.0f, 0.62f, 0.22f, 18.0f);
-
-    auto* postProcessCb = reinterpret_cast<PostProcessCBGPU*>(m_postProcessCBMapped);
+    auto* postProcessCb = reinterpret_cast<PostProcessCBGPU*>(m_postProcessCBMapped + m_frameIndex * kPostProcessCbStride);
     postProcessCb->invScreen_pad = XMFLOAT4(iw, ih, 0.0f, 0.0f);
     postProcessCb->vignetteEnabled = vignetteEnabled && !shadowDebugView &&
         !cascadeColorDebug && shadowMapDebugIndex == 0 ? 1u : 0u;
     postProcessCb->flyEyeEnabled = flyEyeEnabled ? 1u : 0u;
+    postProcessCb->toneMappingEnabled = !shadowDebugView && !cascadeColorDebug && shadowMapDebugIndex == 0 ? 1u : 0u;
 
-    const XMVECTOR axis = XMVector3Normalize(XMLoadFloat3(&cameraForward));
-    const XMVECTOR eye = XMLoadFloat3(&cameraPos);
+}
 
-    LightGpu& spot = cb->lights[0];
-    spot.type = LIGHT_SPOT;
-    XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(&spot.position_range), eye);
-    spot.position_range.w = 0.f; // Camera flashlight is disabled: it flattened CSM shadows.
-    XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(&spot.direction_cosOuter), axis);
-    spot.direction_cosOuter.w = cosf(XM_PI / 7.f);
-    spot.spotCosInner = cosf(XM_PI / 10.f);
-    spot.color_intensity = XMFLOAT4(1.f, 0.97f, 0.9f, 0.0f);
+void RenderingSystem::SetPointLights(std::vector<PointLight> lights)
+{
+    if (lights.size() > LightTiling::MaxPointLights)
+        throw std::length_error("At most 4096 point lights are supported");
+    for (const auto& light : lights)
+    {
+        const auto& p = light.positionRadius;
+        const auto& c = light.colorIntensity;
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+            !std::isfinite(p.w) || p.w <= 0.0f ||
+            !std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) ||
+            !std::isfinite(c.w) || c.x < 0 || c.y < 0 || c.z < 0 || c.w < 0)
+            throw std::invalid_argument("Point lights require finite position, positive radius and nonnegative linear colour/intensity");
+    }
+    m_pointLights = std::move(lights);
+}
 
+void RenderingSystem::UploadLightTiles(const XMMATRIX& viewProjection, UINT width, UINT height)
+{
+    const auto grid = LightTiling::Build(m_pointLights, viewProjection, width, height);
+    auto& frame = m_lightFrames[m_frameIndex];
+    // BeginFrame's fence wait protects these allocations and mapped writes.
+    // Allocate only as much as the current list needs; retain capacity thereafter.
+    auto upload = [&](ComPtr<ID3D12Resource>& buffer, uint8_t*& mapped, UINT64& capacity,
+        const void* source, UINT64 bytes)
+    {
+        const UINT64 required = (std::max)(256ull, (bytes + 255) & ~255ull);
+        if (capacity < required)
+        {
+            if (buffer) buffer->Unmap(0, nullptr);
+            buffer = CreateUploadCb(m_device.Get(), required);
+            D3D12_RANGE readRange{0, 0};
+            const HRESULT hr = buffer->Map(0, &readRange, reinterpret_cast<void**>(&mapped));
+            if (FAILED(hr)) std::exit(static_cast<int>(hr));
+            capacity = required;
+        }
+        if (bytes) std::memcpy(mapped, source, static_cast<size_t>(bytes));
+    };
+    upload(frame.lights, frame.lightsMapped, frame.lightsCapacity,
+        m_pointLights.data(), m_pointLights.size() * sizeof(PointLight));
+    upload(frame.ranges, frame.rangesMapped, frame.rangesCapacity,
+        grid.ranges.data(), grid.ranges.size() * sizeof(LightTiling::TileRange));
+    upload(frame.indices, frame.indicesMapped, frame.indicesCapacity,
+        grid.indices.data(), grid.indices.size() * sizeof(uint32_t));
 }
 
 bool RenderingSystem::LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
@@ -469,7 +498,15 @@ bool RenderingSystem::LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
     ID3D12CommandList* lists[] = {uploadCommands}; queue->ExecuteCommandLists(1, lists);
     ComPtr<ID3D12Fence> fence; if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return false;
     HANDLE eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr); if (!eventHandle) return false;
-    queue->Signal(fence.Get(), 1); fence->SetEventOnCompletion(1, eventHandle); WaitForSingleObject(eventHandle, INFINITE); CloseHandle(eventHandle);
+    if (FAILED(queue->Signal(fence.Get(), 1)) || FAILED(fence->SetEventOnCompletion(1, eventHandle)) ||
+        WaitForSingleObject(eventHandle, INFINITE) != WAIT_OBJECT_0)
+    {
+        CloseHandle(eventHandle);
+        return false;
+    }
+    CloseHandle(eventHandle);
+    m_environmentMaxLod = static_cast<float>(prefiltered->GetDesc().MipLevels - 1);
+    m_iblUploads.clear();
     m_iblTextures = {irradiance, prefiltered, integration};
     return true;
 }
@@ -486,11 +523,16 @@ void RenderingSystem::DrawLightingPass(
     cmd->SetGraphicsRootSignature(m_rootSigLight.Get());
     cmd->SetPipelineState(m_psoLight.Get());
 
-    cmd->SetGraphicsRootConstantBufferView(0, m_lightingCB->GetGPUVirtualAddress());
+    cmd->SetGraphicsRootConstantBufferView(0, m_lightingCB->GetGPUVirtualAddress() + m_frameIndex * kLightingCbStride);
 
     D3D12_GPU_DESCRIPTOR_HANDLE table = srvHeapShaderVisible->GetGPUDescriptorHandleForHeapStart();
     table.ptr += static_cast<SIZE_T>(m_gbufferSrvBase) * static_cast<SIZE_T>(m_srvDescriptorIncrement);
     cmd->SetGraphicsRootDescriptorTable(1, table);
+
+    const auto& frame = m_lightFrames[m_frameIndex];
+    cmd->SetGraphicsRootShaderResourceView(2, frame.lights->GetGPUVirtualAddress());
+    cmd->SetGraphicsRootShaderResourceView(3, frame.ranges->GetGPUVirtualAddress());
+    cmd->SetGraphicsRootShaderResourceView(4, frame.indices->GetGPUVirtualAddress());
 
     const auto toRenderTarget = D3DHelpers::Transition(
         m_lightingTarget.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -525,7 +567,7 @@ void RenderingSystem::DrawPostProcessPass(
     cmd->SetDescriptorHeaps(1, heaps);
     cmd->SetGraphicsRootSignature(m_rootSigPostProcess.Get());
     cmd->SetPipelineState(m_psoPostProcess.Get());
-    cmd->SetGraphicsRootConstantBufferView(0, m_postProcessCB->GetGPUVirtualAddress());
+    cmd->SetGraphicsRootConstantBufferView(0, m_postProcessCB->GetGPUVirtualAddress() + m_frameIndex * kPostProcessCbStride);
 
     D3D12_GPU_DESCRIPTOR_HANDLE table = srvHeapShaderVisible->GetGPUDescriptorHandleForHeapStart();
     table.ptr += static_cast<SIZE_T>(m_postProcessSrvIndex) * m_srvDescriptorIncrement;

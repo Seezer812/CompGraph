@@ -6,7 +6,6 @@ cbuffer FrameCB : register(b0)
     row_major float4x4 ViewProj;
     float4 TimeCamPos;
     float4 UvAnimAndPad;
-    float _PadRest[24];
 };
 
 cbuffer MatCB : register(b1)
@@ -23,7 +22,6 @@ cbuffer MatCB : register(b1)
     uint HasDisplacementMap;
     uint EnableTessellation;
     uint IsPbrMaterial;
-    float _PadMat[45];
 };
 
 Texture2D Albedo : register(t0);
@@ -48,6 +46,12 @@ GeoVsOut GeometryVS(GeoVsIn input)
 
 struct TessFactors { float edges[3] : SV_TessFactor; float inside : SV_InsideTessFactor; };
 
+float EdgeTessellation(float3 a, float3 b)
+{
+    float distanceToCamera = length((a + b) * 0.5f - TimeCamPos.yzw);
+    return lerp(5.0f, 1.0f, saturate(distanceToCamera / 14.0f));
+}
+
 TessFactors TessellationFactors(InputPatch<GeoVsOut, 3> patch)
 {
     TessFactors factors;
@@ -56,10 +60,11 @@ TessFactors TessellationFactors(InputPatch<GeoVsOut, 3> patch)
         factors.edges[0] = factors.edges[1] = factors.edges[2] = factors.inside = 1.0f;
         return factors;
     }
-    float3 center = (patch[0].posW + patch[1].posW + patch[2].posW) / 3.0f;
-    float distanceToCamera = length(center - TimeCamPos.yzw);
-    float level = lerp(5.0f, 1.0f, saturate(distanceToCamera / 14.0f));
-    factors.edges[0] = factors.edges[1] = factors.edges[2] = factors.inside = level;
+    // Shared edges must receive the same factor from both adjacent triangles.
+    factors.edges[0] = EdgeTessellation(patch[1].posW, patch[2].posW);
+    factors.edges[1] = EdgeTessellation(patch[2].posW, patch[0].posW);
+    factors.edges[2] = EdgeTessellation(patch[0].posW, patch[1].posW);
+    factors.inside = (factors.edges[0] + factors.edges[1] + factors.edges[2]) / 3.0f;
     return factors;
 }
 
@@ -126,7 +131,15 @@ GeoRtOut GeometryPS(GeoVsOut input)
     if (UseUvAnim)
         uv += UvAnimAndPad.xy * TimeCamPos.x;
 
+    // Albedo has an sRGB SRV: hardware decodes before bilinear filtering.
     const float3 baseColor = Albedo.Sample(Samp, uv).rgb * Kd.rgb;
+    if (IsEmissive != 0)
+    {
+        output.albedo = float4(baseColor, 0.0f);
+        output.normal = 0.0f; // Lighting pass treats this as unlit colour.
+        output.depth = input.clipPos.z;
+        return output;
+    }
     // OBJ/MTL is a specular-gloss workflow.  Convert its shininess to the
     // perceptually linear roughness needed by the metallic-roughness BRDF.
     // Sponza has no reliable metalness map, so coloured, very strong specular
@@ -139,10 +152,15 @@ GeoRtOut GeometryPS(GeoVsOut input)
     float3 normalW = normalize(input.nrmW);
     if (HasNormalMap)
     {
-        float3 tangent = normalize(ddx(input.posW) * ddy(input.uv).y - ddy(input.posW) * ddx(input.uv).y);
-        float3 bitangent = normalize(cross(normalW, tangent));
+        float3 dpdx = ddx(input.posW), dpdy = ddy(input.posW);
+        float2 duvdx = ddx(input.uv), duvdy = ddy(input.uv);
+        float3 dpdyPerp = cross(dpdy, normalW), dpdxPerp = cross(normalW, dpdx);
+        float3 tangent = dpdyPerp * duvdx.x + dpdxPerp * duvdy.x;
+        float3 bitangent = dpdyPerp * duvdx.y + dpdxPerp * duvdy.y;
+        float scale = rsqrt(max(max(dot(tangent, tangent), dot(bitangent, bitangent)), 1e-12f));
         float3 normalT = NormalMap.Sample(Samp, uv).xyz * 2.0f - 1.0f;
-        normalW = normalize(tangent * normalT.x + bitangent * normalT.y + normalW * normalT.z);
+        float3 mapped = tangent * (normalT.x * scale) + bitangent * (normalT.y * scale) + normalW * normalT.z;
+        if (dot(mapped, mapped) > 1e-12f) normalW = normalize(mapped);
     }
     output.normal = float4(normalW, roughness);
     // In a pixel shader SV_POSITION.z is already the post-projection depth

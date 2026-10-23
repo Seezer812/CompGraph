@@ -3,18 +3,23 @@
 Texture2D GAlbedo : register(t0);
 Texture2D GNormal : register(t1);
 Texture2D GDepth : register(t2);
-Texture2D ShadowMaps[4] : register(t3);
+Texture2D ShadowMap0 : register(t3);
+Texture2D ShadowMap1 : register(t4);
+Texture2D ShadowMap2 : register(t5);
+Texture2D ShadowMap3 : register(t6);
 TextureCube IrradianceMap : register(t7);
 TextureCube PreFilteredEnvMap : register(t8);
 Texture2D IntegrationMap : register(t9);
 TextureCube PointShadowMap : register(t10);
-Texture2D CascadeDebugTextures[4] : register(t11);
+Texture2D CascadeDebug0 : register(t11);
+Texture2D CascadeDebug1 : register(t12);
+Texture2D CascadeDebug2 : register(t13);
+Texture2D CascadeDebug3 : register(t14);
 SamplerState GSamp : register(s0);
 SamplerComparisonState ShadowSamp : register(s1);
 
 #define LIGHT_DIR 0
 #define LIGHT_POINT 1
-#define LIGHT_SPOT 2
 
 struct GpuLight
 {
@@ -26,46 +31,59 @@ struct GpuLight
     uint2 pad;
 };
 
+struct PointLight
+{
+    float4 positionRadius;
+    float4 colorIntensity;
+};
+StructuredBuffer<PointLight> PointLights : register(t15);
+StructuredBuffer<uint2> LightTileRanges : register(t16);
+StructuredBuffer<uint> LightTileIndices : register(t17);
+static const uint LightTileSize = 32;
+
 cbuffer LightingCB : register(b0)
 {
     float4 CameraPos_pad;
     float4 InvScreen_pad;
     row_major float4x4 InverseViewProjection;
-    float4 CameraForward_shadowEnabled;
+    float4 ShadowSettings; // x: environment max LOD, w: shadows enabled
     float4 CascadeSplits;
     row_major float4x4 CascadeMatrices[4];
     uint LightCount;
-    uint LightingPassPadding;
+    uint TileCountX;
     uint ShadowMapDebugIndex;
     uint CascadeColorDebug;
-    GpuLight Lights[3];
+    GpuLight Sun;
 };
 
 float SampleCascade(uint cascade, float2 uv, float depth)
 {
-    // Shader Model 5 requires a literal texture-array index at SampleCmp.
-    if (cascade == 0) return ShadowMaps[0].SampleCmpLevelZero(ShadowSamp, uv, depth);
-    if (cascade == 1) return ShadowMaps[1].SampleCmpLevelZero(ShadowSamp, uv, depth);
-    if (cascade == 2) return ShadowMaps[2].SampleCmpLevelZero(ShadowSamp, uv, depth);
-    return ShadowMaps[3].SampleCmpLevelZero(ShadowSamp, uv, depth);
+    float result = 1.0f;
+    if (cascade == 0) result = ShadowMap0.SampleCmpLevelZero(ShadowSamp, uv, depth);
+    else if (cascade == 1) result = ShadowMap1.SampleCmpLevelZero(ShadowSamp, uv, depth);
+    else if (cascade == 2) result = ShadowMap2.SampleCmpLevelZero(ShadowSamp, uv, depth);
+    else result = ShadowMap3.SampleCmpLevelZero(ShadowSamp, uv, depth);
+    return result;
 }
 
 float SampleShadowMapDepth(uint mapIndex, float2 uv)
 {
-    // Explicit branches keep the texture-array index literal for Shader Model 5.
-    if (mapIndex == 1) return ShadowMaps[0].Sample(GSamp, uv).r;
-    if (mapIndex == 2) return ShadowMaps[1].Sample(GSamp, uv).r;
-    if (mapIndex == 3) return ShadowMaps[2].Sample(GSamp, uv).r;
-    return ShadowMaps[3].Sample(GSamp, uv).r;
+    float result = 1.0f;
+    if (mapIndex == 1) result = ShadowMap0.SampleLevel(GSamp, uv, 0).r;
+    else if (mapIndex == 2) result = ShadowMap1.SampleLevel(GSamp, uv, 0).r;
+    else if (mapIndex == 3) result = ShadowMap2.SampleLevel(GSamp, uv, 0).r;
+    else result = ShadowMap3.SampleLevel(GSamp, uv, 0).r;
+    return result;
 }
 
 float4 SampleCascadeDebugTexture(uint cascade, float2 uv)
 {
-    // Shader Model 5 requires literal resource-array indices for sampling.
-    if (cascade == 0) return CascadeDebugTextures[0].Sample(GSamp, uv);
-    if (cascade == 1) return CascadeDebugTextures[1].Sample(GSamp, uv);
-    if (cascade == 2) return CascadeDebugTextures[2].Sample(GSamp, uv);
-    return CascadeDebugTextures[3].Sample(GSamp, uv);
+    float4 result = 0.0f;
+    if (cascade == 0) result = CascadeDebug0.SampleLevel(GSamp, uv, 0);
+    else if (cascade == 1) result = CascadeDebug1.SampleLevel(GSamp, uv, 0);
+    else if (cascade == 2) result = CascadeDebug2.SampleLevel(GSamp, uv, 0);
+    else result = CascadeDebug3.SampleLevel(GSamp, uv, 0);
+    return result;
 }
 
 float ShadowPcf(uint cascade, float3 position, float3 normal, float3 lightDirection)
@@ -80,15 +98,15 @@ float ShadowPcf(uint cascade, float3 position, float3 normal, float3 lightDirect
     float visibility = 0.0f;
     [unroll] for (int y = -2; y <= 2; ++y)
     [unroll] for (int x = -2; x <= 2; ++x)
-        visibility += SampleCascade(cascade, uv + float2(x, y) * texel, uvz.z - bias);
+        visibility += SampleCascade(cascade, uv + float2(x, y) * texel * 2.0f, uvz.z - bias);
     return visibility / 25.0f;
 }
 
-float PointShadowVisibility(float3 position, float3 normal, GpuLight light)
+float PointShadowVisibility(float3 position, float3 normal, PointLight light)
 {
-    float3 fromLight = position - light.position_range.xyz;
+    float3 fromLight = position - light.positionRadius.xyz;
     float distanceToLight = length(fromLight);
-    float range = light.position_range.w;
+    float range = light.positionRadius.w;
     if (distanceToLight <= 1e-4f || distanceToLight >= range) return 1.0f;
 
     float3 direction = fromLight / distanceToLight;
@@ -164,23 +182,18 @@ float3 EvaluateLight(GpuLight light, float3 albedo, float metallic, float roughn
     float3 lightDirection;
     float attenuation = 1.0f;
     if (light.type == LIGHT_DIR)
-        lightDirection = normalize(-light.direction_cosOuter.xyz);
+        lightDirection = -light.direction_cosOuter.xyz / max(length(light.direction_cosOuter.xyz), 1e-5f);
     else
     {
         float3 toLight = light.position_range.xyz - position;
         float distanceToLight = length(toLight);
         if (distanceToLight > light.position_range.w) return 0.0f;
         lightDirection = toLight / max(distanceToLight, 1e-5f);
-        float falloff = 1.0f - saturate(distanceToLight / light.position_range.w);
+        float falloff = 1.0f - saturate(distanceToLight / max(light.position_range.w, 1e-5f));
         attenuation = falloff * falloff;
-        if (light.type == LIGHT_SPOT)
-        {
-            float rho = dot(-lightDirection, normalize(light.direction_cosOuter.xyz));
-            float spot = saturate((rho - light.direction_cosOuter.w) / max(light.spotCosInner - light.direction_cosOuter.w, 1e-4f));
-            attenuation *= spot * spot;
-        }
     }
-    float3 halfVector = normalize(lightDirection + viewDirection);
+    float3 halfSum = lightDirection + viewDirection;
+    float3 halfVector = halfSum * rsqrt(max(dot(halfSum, halfSum), 1e-12f));
     float nDotL = saturate(dot(normal, lightDirection));
     if (nDotL <= 0.0f) return 0.0f;
     float3 f0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
@@ -233,7 +246,8 @@ float4 LightingPS(FsOut input) : SV_Target0
         metallic = 0.0f;
     }
 
-    float3 viewDirection = normalize(CameraPos_pad.xyz - position);
+    float3 toCamera = CameraPos_pad.xyz - position;
+    float3 viewDirection = toCamera * rsqrt(max(dot(toCamera, toCamera), 1e-12f));
     float nDotV = saturate(dot(normal, viewDirection));
     float3 f0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
     float3 F = FresnelSchlickRoughness(nDotV, f0, roughness);
@@ -241,22 +255,38 @@ float4 LightingPS(FsOut input) : SV_Target0
     float3 irradiance = IrradianceMap.Sample(GSamp, normal).rgb;
     float3 diffuseIbl = irradiance * albedo;
     float3 reflection = reflect(-viewDirection, normal);
-    float3 prefiltered = PreFilteredEnvMap.SampleLevel(GSamp, reflection, roughness * 11.0f).rgb;
+    float3 prefiltered = PreFilteredEnvMap.SampleLevel(GSamp, reflection, roughness * ShadowSettings.x).rgb;
     float2 brdf = IntegrationMap.Sample(GSamp, float2(nDotV, roughness)).rg;
     float3 specularIbl = prefiltered * (F * brdf.x + brdf.y);
     float3 color = kD * diffuseIbl + specularIbl;
 
-    float3 sunDirection = normalize(-Lights[2].direction_cosOuter.xyz);
-    float rawShadow = ShadowPcf(cascade, position, normal, sunDirection);
+    float3 sunDirection = normalize(-Sun.direction_cosOuter.xyz);
+    float rawShadow = ShadowSettings.w > 0.5f ? ShadowPcf(cascade, position, normal, sunDirection) : 1.0f;
     if (InvScreen_pad.z > 0.5f) return float4(rawShadow.xxx, 1.0f);
     // The shadow visibility is the actual directional-light multiplier.
     // Keeping a forced 25% contribution made fully occluded regions appear lit.
-    float sunShadow = CameraForward_shadowEnabled.w > 0.5f ? rawShadow : 1.0f;
-    color += EvaluateLight(Lights[0], albedo, metallic, roughness, normal, position, viewDirection);
-    float pointVisibility = CameraForward_shadowEnabled.w > 0.5f
-        ? PointShadowVisibility(position, normal, Lights[1]) : 1.0f;
-    color += EvaluateLight(Lights[1], albedo, metallic, roughness, normal, position, viewDirection) * pointVisibility;
-    color += EvaluateLight(Lights[2], albedo, metallic, roughness, normal, position, viewDirection) * sunShadow;
+    float sunShadow = rawShadow;
+    color += EvaluateLight(Sun, albedo, metallic, roughness, normal, position, viewDirection) * sunShadow;
+
+    const uint2 tile = uint2(pixel) / LightTileSize;
+    const uint2 range = LightTileRanges[tile.y * TileCountX + tile.x];
+    [loop] for (uint i = 0; i < range.y; ++i)
+    {
+        const uint lightIndex = LightTileIndices[range.x + i];
+        if (lightIndex >= LightCount) continue;
+        const PointLight localLight = PointLights[lightIndex];
+        const float3 toLight = localLight.positionRadius.xyz - position;
+        if (dot(toLight, toLight) >= localLight.positionRadius.w * localLight.positionRadius.w) continue;
+        GpuLight light = (GpuLight)0;
+        light.type = LIGHT_POINT;
+        light.position_range = localLight.positionRadius;
+        light.color_intensity = localLight.colorIntensity;
+        // Only point light zero owns a shadow cubemap.
+        float visibility = 1.0f;
+        if (lightIndex == 0 && ShadowSettings.w > 0.5f)
+            visibility = PointShadowVisibility(position, normal, localLight);
+        color += EvaluateLight(light, albedo, metallic, roughness, normal, position, viewDirection) * visibility;
+    }
 
     return float4(color, 1.0f);
 }

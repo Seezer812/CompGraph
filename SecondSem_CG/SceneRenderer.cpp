@@ -1,4 +1,5 @@
 #include "SceneRenderer.h"
+#include "D3D12Context.h"
 
 #include "D3DHelpers.h"
 #include "ScenePaths.h"
@@ -67,14 +68,14 @@ bool IsShadowCasterMaterial(const Obj::Material& material)
 bool SceneRenderer::Load(
     ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12CommandAllocator* uploadAllocator,
     ID3D12GraphicsCommandList* uploadCommands, ID3D12DescriptorHeap* srvHeap, UINT srvDescriptorSize,
-    const std::filesystem::path& objPath)
+    const std::filesystem::path& objPath, UINT materialSrvLimit)
 {
     m_ready = false;
     m_isPbrModel = objPath.filename() == L"Cerberus.obj";
     const XMMATRIX world = m_isPbrModel
         ? XMMatrixTranslation(0.037364f, 0.142150f, 0.415043f) *
             XMMatrixRotationX(XM_PI) * XMMatrixScaling(3.0f, 3.0f, 3.0f)
-        : XMMatrixScaling(.01f, .01f, .01f) * XMMatrixRotationX(XM_PI);
+        : XMMatrixScaling(.01f, .01f, .01f);
     XMStoreFloat4x4(&m_world, world);
     m_textures.clear();
     m_materialSrvBase.clear();
@@ -82,6 +83,9 @@ bool SceneRenderer::Load(
     std::wstring error;
     if (!Obj::LoadObj(objPath, m_mesh, error) || m_mesh.vertices.empty() || m_mesh.indices.empty())
         return false;
+    // Slots 0..2 are fallback textures; never overwrite deferred-pass SRVs.
+    if (materialSrvLimit < 3 || materialSrvLimit > srvHeap->GetDesc().NumDescriptors ||
+        m_mesh.materials.size() > (materialSrvLimit - 3) / 4) return false;
 
     // Remove the imported photographic backdrop before any GPU buffers are built.
     // It cannot then reach either the colour or the shadow pass.
@@ -137,14 +141,15 @@ bool SceneRenderer::Load(
     m_textures.push_back(white); m_textures.push_back(flatNormal);
 
     std::unordered_map<std::wstring, ComPtr<ID3D12Resource>> cache;
-    auto bind = [&](UINT slot, const std::filesystem::path& path, ID3D12Resource* fallback) {
-        if (!std::filesystem::exists(path)) { Tex::WriteTexture2DSrv(device, fallback, srvHeap, slot, srvDescriptorSize); return false; }
+    auto bind = [&](UINT slot, const std::filesystem::path& path, ID3D12Resource* fallback, bool srgb = false) {
+        if (!std::filesystem::exists(path)) { Tex::WriteTexture2DSrv(device, fallback, srvHeap, slot, srvDescriptorSize, srgb); return false; }
         const std::wstring key = path.lexically_normal().wstring();
-        if (auto found = cache.find(key); found != cache.end()) { Tex::WriteTexture2DSrv(device, found->second.Get(), srvHeap, slot, srvDescriptorSize); return true; }
+        if (auto found = cache.find(key); found != cache.end()) { Tex::WriteTexture2DSrv(device, found->second.Get(), srvHeap, slot, srvDescriptorSize, srgb); return true; }
         ComPtr<ID3D12Resource> texture; std::wstring loadError;
         if (!Tex::CreateTexture2DFromFile(device, uploadCommands, srvHeap, slot, srvDescriptorSize, path, texture, uploads, loadError)) {
-            Tex::WriteTexture2DSrv(device, fallback, srvHeap, slot, srvDescriptorSize); return false;
+            Tex::WriteTexture2DSrv(device, fallback, srvHeap, slot, srvDescriptorSize, srgb); return false;
         }
+        Tex::WriteTexture2DSrv(device, texture.Get(), srvHeap, slot, srvDescriptorSize, srgb);
         cache.emplace(key, texture); m_textures.push_back(texture); return true;
     };
 
@@ -156,7 +161,7 @@ bool SceneRenderer::Load(
     {
         const auto& material = m_mesh.materials[i]; m_materialSrvBase[i] = slot;
         const auto diffuse = Tex::ResolveTexturePathInTexturesFolder(materialDir, material.diffuseMapRel);
-        bind(slot, diffuse, white.Get());
+        bind(slot, diffuse, white.Get(), true);
         const auto specularPath = m_isPbrModel ? materialDir / L"textures/Metallic.tga" :
             Tex::ResolveTexturePathInTexturesFolder(materialDir, material.specularMapRel);
         spec[i] = bind(slot + 1, specularPath, white.Get());
@@ -192,17 +197,20 @@ bool SceneRenderer::Load(
         }
     }
     CloseHandle(eventHandle);
-    m_uploads = std::move(uploads);
+    // Uploads have completed; staging resources need not occupy GPU-visible RAM.
+    uploads.clear();
 
     const UINT materialCount = (std::max)(1u, static_cast<UINT>(m_mesh.materials.size()));
     m_materialConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, materialCount * kCbAlignment);
     // Main camera and top camera are encoded in one command list.  Keep a
-    // separate frame constant slot for each draw until the GPU consumes them.
-    m_frameConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, 4 * kCbAlignment);
-    m_shadowConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, 10 * kCbAlignment);
-    D3D12_RANGE range{0, 0}; m_frameConstants->Map(0, &range, reinterpret_cast<void**>(&m_frameConstantsMapped));
-    m_shadowConstants->Map(0, &range, reinterpret_cast<void**>(&m_shadowConstantsMapped));
-    uint8_t* mapped = nullptr; m_materialConstants->Map(0, &range, reinterpret_cast<void**>(&mapped));
+    // separate constant slot for each draw and each in-flight GPU frame.
+    m_frameConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, D3D12Context::FrameCount * 4 * kCbAlignment);
+    m_shadowConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, D3D12Context::FrameCount * 10 * kCbAlignment);
+    D3D12_RANGE range{0, 0};
+    if (FAILED(m_frameConstants->Map(0, &range, reinterpret_cast<void**>(&m_frameConstantsMapped))) ||
+        FAILED(m_shadowConstants->Map(0, &range, reinterpret_cast<void**>(&m_shadowConstantsMapped)))) return false;
+    uint8_t* mapped = nullptr;
+    if (FAILED(m_materialConstants->Map(0, &range, reinterpret_cast<void**>(&mapped)))) return false;
     for (UINT i = 0; i < materialCount; ++i) {
         MaterialConstants constants{};
         if (i < m_mesh.materials.size()) { const auto& material = m_mesh.materials[i];
@@ -213,14 +221,18 @@ bool SceneRenderer::Load(
         }
         std::memcpy(mapped + i * kCbAlignment, &constants, sizeof(constants));
     }
-    m_materialConstants->Unmap(0, nullptr); m_ready = true; return true;
+    m_materialConstants->Unmap(0, nullptr);
+    // Rendering uses GPU geometry plus submesh/material metadata from now on.
+    m_mesh.vertices.clear(); m_mesh.vertices.shrink_to_fit();
+    m_mesh.indices.clear(); m_mesh.indices.shrink_to_fit();
+    m_ready = true; return true;
 }
 
 void SceneRenderer::Draw(ID3D12GraphicsCommandList* commandList, ID3D12DescriptorHeap* srvHeap, ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState, const XMMATRIX& viewProjection, const XMFLOAT3& cameraPosition, float timeSeconds, bool tessellationEnabled) const
 {
     if (!m_ready) return;
     FrameConstants frame{}; frame.world = m_world; XMStoreFloat4x4(&frame.viewProjection, viewProjection); frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z); frame.uvAnimation = XMFLOAT4(.035f, .022f, tessellationEnabled ? 1.f : 0.f, 0.f);
-    const UINT frameSlot = m_nextFrameConstantSlot++ % 4;
+    const UINT frameSlot = m_frameIndex * 4 + m_nextFrameConstantSlot++ % 4;
     std::memcpy(m_frameConstantsMapped + static_cast<size_t>(frameSlot) * kCbAlignment, &frame, sizeof(frame));
     ID3D12DescriptorHeap* heaps[] = {srvHeap}; commandList->SetDescriptorHeaps(1, heaps); commandList->SetGraphicsRootSignature(rootSignature); commandList->SetPipelineState(pipelineState); commandList->SetGraphicsRootConstantBufferView(0, m_frameConstants->GetGPUVirtualAddress() + static_cast<UINT64>(frameSlot) * kCbAlignment); commandList->IASetPrimitiveTopology(tessellationEnabled ? D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); commandList->IASetVertexBuffers(0, 1, &m_vertexView); commandList->IASetIndexBuffer(&m_indexView);
     const auto base = srvHeap->GetGPUDescriptorHandleForHeapStart();
@@ -233,7 +245,7 @@ void SceneRenderer::DrawShadow(ID3D12GraphicsCommandList* commandList, ID3D12Roo
     struct ShadowConstants { XMFLOAT4X4 world; XMFLOAT4X4 lightViewProjection; XMFLOAT4 lightPositionRange; } constants{};
     constants.world = m_world;
     XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
-    const UINT shadowSlot = cascade % 4;
+    const UINT shadowSlot = m_frameIndex * 10 + cascade % 4;
     std::memcpy(m_shadowConstantsMapped + static_cast<size_t>(shadowSlot) * kCbAlignment, &constants, sizeof(constants));
     commandList->SetGraphicsRootSignature(rootSignature);
     commandList->SetPipelineState(pipelineState);
@@ -258,7 +270,7 @@ void SceneRenderer::DrawPointShadow(ID3D12GraphicsCommandList* commandList, ID3D
     constants.world = m_world;
     XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
     constants.lightPositionRange = lightPositionRange;
-    const UINT shadowSlot = 4 + face;
+    const UINT shadowSlot = m_frameIndex * 10 + 4 + face;
     std::memcpy(m_shadowConstantsMapped + static_cast<size_t>(shadowSlot) * kCbAlignment, &constants, sizeof(constants));
     commandList->SetGraphicsRootSignature(rootSignature);
     commandList->SetPipelineState(pipelineState);

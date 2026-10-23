@@ -20,11 +20,12 @@
 #include "D3DHelpers.h"
 #include "ScenePaths.h"
 #include "SceneRenderer.h"
-#include "WaveWallRenderer.h"
 #include "RenderingSystem.h"
 #include "SpatialCulling.h"
 #include "ShadowMap.h"
 #include "PointShadowMap.h"
+#include "TerrainRenderer.h"
+#include "TerrainChecks.h"
 
 #include <algorithm>
 #include <array>
@@ -33,7 +34,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cwctype>
+#include <cwchar>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -82,9 +85,6 @@ ComPtr<ID3D12PipelineState> g_pipelineGeoWire;
 ComPtr<ID3D12PipelineState> g_pipelineGeoSimple;
 ComPtr<ID3D12PipelineState> g_pipelineGeoMarker;
 ComPtr<ID3D12PipelineState> g_pipelineGeoSimpleWire;
-ComPtr<ID3D12PipelineState> g_pipelineTopCamera;
-ComPtr<ID3D12PipelineState> g_pipelineWaveWall;
-ComPtr<ID3D12PipelineState> g_pipelineWaveWallWire;
 ComPtr<ID3D12RootSignature> g_shadowRootSignature;
 ComPtr<ID3D12PipelineState> g_shadowPipeline;
 ComPtr<ID3D12PipelineState> g_pointShadowPipeline;
@@ -93,7 +93,13 @@ RenderingSystem g_renderSys;
 ShadowMap g_shadowMap;
 PointShadowMap g_pointShadowMap;
 SceneRenderer g_sceneRenderer;
-WaveWallRenderer g_waveWallRenderer;
+TerrainRenderer g_terrain;
+bool g_terrainMode = false;
+bool g_terrainCulling = true;
+bool g_terrainLodColors = false;
+std::wstring g_terrainError;
+XMFLOAT3 g_otherCamPos{0.0f, 25.0f, -55.0f};
+float g_otherCamYaw = 0.0f, g_otherCamPitch = 0.32f;
 
 ComPtr<ID3D12DescriptorHeap> g_srvHeap;
 UINT g_srvDescriptorSize = 0;
@@ -103,24 +109,31 @@ SceneObjectRenderer g_sceneObjectRenderer;
 UINT g_frameIndex = 0;
 float g_appTime = 0.0f;
 
-// Sponza was rotated around X: its interior is toward negative Y, while the
-// floor is at y ≈ 1.26. The old y=1.4 spawn was consequently below the floor.
-XMFLOAT3 g_camPos{5.2f, -0.3f, 0.0f};
+XMFLOAT3 g_camPos{5.2f, 0.3f, 0.0f};
 float g_camYaw = -XM_PIDIV2;
 float g_camPitch = 0.0f;
 bool g_camPrevRmb = false;
+
+void SwitchScene()
+{
+    if (!g_terrain.Ready()) return;
+    g_terrainMode = !g_terrainMode;
+    std::swap(g_camPos, g_otherCamPos);
+    std::swap(g_camYaw, g_otherCamYaw);
+    std::swap(g_camPitch, g_otherCamPitch);
+    g_camPrevRmb = false;
+}
+
 // Sponza содержит много треугольников, поэтому тесселяция включается вручную клавишей T.
 // Так первый кадр гарантированно появляется даже на встроенной видеокарте.
 bool g_tessellationEnabled = false;
 bool g_wireframeEnabled = false;
-bool g_frustumCullingEnabled = true;
 bool g_shadowsEnabled = true;
 bool g_shadowDebugView = false;
 bool g_cascadeColorDebug = false;
-bool g_vignetteEnabled = true;
+bool g_vignetteEnabled = false;
 bool g_flyEyeEnabled = false;
 UINT g_shadowMapDebugIndex = 0;
-SpatialCulling::Stats g_cullingStats{};
 
 LARGE_INTEGER g_qpcFreq{};
 LARGE_INTEGER g_qpcLast{};
@@ -134,19 +147,6 @@ void ThrowIfFailed(HRESULT hr)
         MessageBoxW(nullptr, buf, L"SecondSem CG", MB_OK | MB_ICONERROR);
         std::exit(static_cast<int>(hr));
     }
-}
-
-void WaitForGpu()
-{
-    g_d3d.WaitForGpu();
-}
-
-void ExecuteCommandList()
-{
-    ThrowIfFailed(g_cmdList->Close());
-    ID3D12CommandList* lists[] = {g_cmdList.Get()};
-    g_queue->ExecuteCommandLists(1, lists);
-    WaitForGpu();
 }
 
 void CreateRtv()
@@ -178,10 +178,20 @@ void UpdateWindowTitle()
 {
     if (!g_hwnd)
         return;
-    wchar_t title[320]{};
+    if (g_terrainMode) {
+        const auto& stats = g_terrain.Statistics();
+        wchar_t title[512]{};
+        swprintf_s(title, L"Sponza + Terrain | observer (culling/LOD: primary camera) | F2: interior camera | R: wire %s | L: LOD colors %s | C: culling %s | tiles %u | triangles %u | culled nodes %u | LOD 0..5 %u/%u/%u/%u/%u/%u",
+            g_wireframeEnabled ? L"ON" : L"OFF", g_terrainLodColors ? L"ON" : L"OFF",
+            g_terrainCulling ? L"ON" : L"OFF", stats.patches, stats.triangles, stats.culled,
+            stats.levels[0], stats.levels[1], stats.levels[2], stats.levels[3], stats.levels[4], stats.levels[5]);
+        SetWindowTextW(g_hwnd, title);
+        return;
+    }
+    wchar_t title[340]{};
     swprintf_s(
         title,
-        L"SecondSem CG | H: fly eye %s | Y: CSM %s | U: CSM result %s | I: cascades %s | 1-4: texture %u | 0: scene | V: vignette %s | T: tessellation %s | R: edges %s | F: culling %s | objects: %u/2000",
+        L"Sponza + Terrain | F2: overview | H: fly eye %s | Y: CSM %s | U: CSM result %s | I: cascades %s | 1-4: texture %u | 0: scene | V: vignette %s | T: tessellation %s | R: edges %s",
         g_flyEyeEnabled ? L"ON" : L"OFF",
         g_shadowsEnabled ? L"ON" : L"OFF",
         g_shadowDebugView ? L"ON" : L"OFF",
@@ -189,9 +199,7 @@ void UpdateWindowTitle()
         g_shadowMapDebugIndex,
         g_vignetteEnabled ? L"ON" : L"OFF",
         g_tessellationEnabled ? L"ON" : L"OFF",
-        g_wireframeEnabled ? L"ON" : L"OFF",
-        g_frustumCullingEnabled ? L"ON" : L"OFF",
-        g_cullingStats.visibleObjects);
+        g_wireframeEnabled ? L"ON" : L"OFF");
     SetWindowTextW(g_hwnd, title);
 }
 
@@ -291,19 +299,6 @@ void CreateGeometryPipeline()
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoWire)));
 
-    // Quad-domain pipeline for the procedural wave wall.
-    ComPtr<ID3DBlob> wallHs, wallDs;
-    D3DHelpers::CompileShader(sp.c_str(), "WaveWallHS", "hs_5_0", wallHs);
-    D3DHelpers::CompileShader(sp.c_str(), "WaveWallDS", "ds_5_0", wallDs);
-    pso.HS = {wallHs->GetBufferPointer(), wallHs->GetBufferSize()};
-    pso.DS = {wallDs->GetBufferPointer(), wallDs->GetBufferSize()};
-    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    // This panel is a visible deformation overlay, so both sides must be rendered.
-    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineWaveWall)));
-    pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
-    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineWaveWallWire)));
-
     // Обычная геометрия сцены рисуется треугольниками без тесселяции.
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
@@ -321,45 +316,29 @@ void CreateGeometryPipeline()
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoSimpleWire)));
 
-    // A separate forward pipeline renders the second, top-down camera straight
-    // to the back buffer after the deferred main image has been composed.
-    ComPtr<ID3DBlob> topCameraPs;
-    D3DHelpers::CompileShader(sp.c_str(), "TopCameraPS", "ps_5_0", topCameraPs);
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC topCameraPso = pso;
-    topCameraPso.PS = {topCameraPs->GetBufferPointer(), topCameraPs->GetBufferSize()};
-    topCameraPso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    topCameraPso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    topCameraPso.DepthStencilState.DepthEnable = TRUE;
-    topCameraPso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    topCameraPso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-    topCameraPso.NumRenderTargets = 1;
-    topCameraPso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    // The G-buffer pipeline has three formats.  A pipeline with one target
-    // must explicitly leave the other entries unknown, otherwise D3D12
-    // rejects the descriptor with E_INVALIDARG.
-    topCameraPso.RTVFormats[1] = DXGI_FORMAT_UNKNOWN;
-    topCameraPso.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
-    topCameraPso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    ThrowIfFailed(g_device->CreateGraphicsPipelineState(&topCameraPso, IID_PPV_ARGS(&g_pipelineTopCamera)));
 }
 
 bool LoadScene()
 {
-    const std::filesystem::path objPath = ScenePaths::FindCerberusObj(AppPaths::ExecutableDirectory());
+    const std::filesystem::path objPath = ScenePaths::FindSponzaObj(AppPaths::ExecutableDirectory());
     if (objPath.empty())
         return false;
     return g_sceneRenderer.Load(
         g_device.Get(), g_queue.Get(), g_cmdAlloc[0].Get(), g_cmdList.Get(),
-        g_srvHeap.Get(), g_srvDescriptorSize, objPath) &&
+        g_srvHeap.Get(), g_srvDescriptorSize, objPath, kDeferredSrvBase) &&
         g_renderSys.LoadIbl(g_device.Get(), g_queue.Get(), g_cmdAlloc[0].Get(), g_cmdList.Get(),
             g_srvHeap.Get(), AppPaths::ExecutableDirectory() + L"\\assets\\ibl",
             AppPaths::ExecutableDirectory() + L"\\assets\\cascade_debug");
 }
 
-XMFLOAT4 OrbitingPointLight(float timeSeconds)
+XMFLOAT4 ScenePointLight()
 {
-    const float angle = timeSeconds * 0.75f;
-    return XMFLOAT4(cosf(angle) * 4.0f, -2.0f, sinf(angle) * 4.0f, 12.0f);
+    XMFLOAT3 minimum{}, maximum{};
+    if (!g_sceneRenderer.GetShadowCasterBounds(minimum, maximum))
+        return XMFLOAT4(0.0f, 3.0f, 0.0f, 30.0f);
+    return XMFLOAT4((minimum.x + maximum.x) * 0.5f,
+        (minimum.y + maximum.y) * 0.5f,
+        (minimum.z + maximum.z) * 0.5f, 30.0f);
 }
 
 void DrawScene(const XMMATRIX& viewProj)
@@ -372,59 +351,6 @@ void DrawScene(const XMMATRIX& viewProj)
     g_sceneRenderer.Draw(
         g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), pipeline,
         viewProj, g_camPos, g_appTime, g_tessellationEnabled);
-}
-
-XMMATRIX TopCameraViewProjection()
-{
-    // This is a regular perspective camera placed above the culling objects,
-    // not an orthographic minimap.  It looks down at the centre of the scene.
-    const XMVECTOR eye = XMVectorSet(0.0f, -48.0f, 32.0f, 1.0f);
-    const XMVECTOR target = XMVectorZero();
-    // With negative Y as world-up, use Z to orient a camera looking nearly
-    // vertically along Y and avoid a near-parallel up/direction pair.
-    const XMVECTOR worldUp = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
-    return XMMatrixLookAtLH(eye, target, worldUp) * XMMatrixPerspectiveFovLH(XM_PI / 3.0f, 1.0f, 0.1f, 120.0f);
-}
-
-void DrawTopCamera(D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv, const XMMATRIX& mainViewProjection)
-{
-    constexpr LONG kMargin = 16;
-    const LONG outerSize = static_cast<LONG>((std::min)(280u, (std::min)(g_width, g_height) / 3));
-    if (outerSize < 64)
-        return;
-
-    const D3D12_RECT outerRect{
-        static_cast<LONG>(g_width) - outerSize - kMargin,
-        static_cast<LONG>(g_height) - outerSize - kMargin,
-        static_cast<LONG>(g_width) - kMargin,
-        static_cast<LONG>(g_height) - kMargin};
-    const D3D12_RECT innerRect{outerRect.left + 3, outerRect.top + 3, outerRect.right - 3, outerRect.bottom - 3};
-    const float borderColor[] = {0.85f, 0.90f, 1.0f, 1.0f};
-    const float backgroundColor[] = {0.015f, 0.025f, 0.045f, 1.0f};
-    g_cmdList->ClearRenderTargetView(backBufferRtv, borderColor, 1, &outerRect);
-    g_cmdList->ClearRenderTargetView(backBufferRtv, backgroundColor, 1, &innerRect);
-    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = g_dsvHeap->GetCPUDescriptorHandleForHeapStart();
-    g_cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 1, &innerRect);
-    g_cmdList->OMSetRenderTargets(1, &backBufferRtv, FALSE, &dsv);
-
-    D3D12_VIEWPORT viewport{};
-    viewport.TopLeftX = static_cast<float>(innerRect.left);
-    viewport.TopLeftY = static_cast<float>(innerRect.top);
-    viewport.Width = static_cast<float>(innerRect.right - innerRect.left);
-    viewport.Height = static_cast<float>(innerRect.bottom - innerRect.top);
-    viewport.MaxDepth = 1.0f;
-    g_cmdList->RSSetViewports(1, &viewport);
-    g_cmdList->RSSetScissorRects(1, &innerRect);
-
-    const XMMATRIX topViewProjection = TopCameraViewProjection();
-    const XMFLOAT3 topCameraPosition{0.0f, -48.0f, 32.0f};
-    g_sceneRenderer.Draw(
-        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineTopCamera.Get(),
-        topViewProjection, topCameraPosition, g_appTime, false);
-    g_sceneObjectRenderer.DrawCulledFromTopCamera(
-        g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineTopCamera.Get(),
-        topViewProjection, mainViewProjection, g_appTime,
-        g_frustumCullingEnabled, true);
 }
 
 void CreateShadowPipeline()
@@ -479,7 +405,8 @@ std::array<XMMATRIX, PointShadowMap::FaceCount> PointShadowMatrices(const XMFLOA
         XMVectorSet(0, 1, 0, 0), XMVectorSet(0, 1, 0, 0),
     };
     std::array<XMMATRIX, PointShadowMap::FaceCount> matrices{};
-    const XMMATRIX projection = XMMatrixPerspectiveFovLH(XM_PIDIV2, 1.0f, 0.1f, range);
+    const XMMATRIX projection = XMMatrixPerspectiveFovLH(
+        XM_PIDIV2, 1.0f, (std::min)(0.1f, range * 0.01f), range);
     for (UINT face = 0; face < PointShadowMap::FaceCount; ++face)
         matrices[face] = XMMatrixLookToLH(eye, directions[face], ups[face]) * projection;
     return matrices;
@@ -501,13 +428,13 @@ std::array<XMMATRIX, ShadowMap::CascadeCount> CascadeMatrices()
     // Scene-anchored CSM: the light cameras remain fixed in world space.
     // The main camera selects a resolution level, but cannot make the shadow
     // projection slide over Sponza while the player moves.
-    const XMVECTOR lightDir = XMVector3Normalize(XMVectorSet(0.18f, 0.96f, -0.22f, 0));
+    const XMVECTOR lightDir = XMVector3Normalize(XMVectorSet(0.18f, -0.96f, -0.22f, 0));
     const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
     const XMVECTOR lightUp = fabsf(XMVectorGetY(lightDir)) > 0.95f
         ? XMVectorSet(0, 0, 1, 0) : worldUp;
 
-    XMFLOAT3 boundsMin{-20.0f, -15.0f, -12.0f};
-    XMFLOAT3 boundsMax{18.0f, 2.0f, 12.0f};
+    XMFLOAT3 boundsMin{-20.0f, -2.0f, -12.0f};
+    XMFLOAT3 boundsMax{18.0f, 15.0f, 12.0f};
     g_sceneRenderer.GetShadowCasterBounds(boundsMin, boundsMax);
     const XMVECTOR centre = XMVectorSet(
         (boundsMin.x + boundsMax.x) * 0.5f,
@@ -542,6 +469,7 @@ void DrawFrame(float dt)
 {
     g_frameIndex = g_swapChain->GetCurrentBackBufferIndex();
 
+    // All mutable upload data has a separate slice for each frame index.
     const UINT64 fenceToWait = g_frameFenceValues[g_frameIndex];
     if (g_fence->GetCompletedValue() < fenceToWait)
     {
@@ -549,12 +477,17 @@ void DrawFrame(float dt)
         WaitForSingleObject(g_fenceEvent, INFINITE);
     }
 
+    g_sceneRenderer.BeginFrame(g_frameIndex);
+    g_sceneObjectRenderer.BeginFrame(g_frameIndex);
+    g_renderSys.BeginFrame(g_frameIndex);
     Camera::Update(g_hwnd, dt, g_camPos, g_camYaw, g_camPitch, g_camPrevRmb);
     g_appTime += dt;
-    const XMMATRIX viewProj = Camera::ViewProjection(g_camPos, g_camYaw, g_camPitch, g_width, g_height);
+    const XMMATRIX viewProj = Camera::ViewProjection(g_camPos, g_camYaw, g_camPitch, g_width, g_height, 0.1f, 5000.0f);
     const auto cascadeSplits = CascadeSplits();
     const auto cascadeMatrices = CascadeMatrices();
-    const XMFLOAT4 pointLightPositionRange = OrbitingPointLight(g_appTime);
+    const bool hasPointLight = !g_renderSys.PointLights().empty();
+    const XMFLOAT4 pointLightPositionRange = hasPointLight
+        ? g_renderSys.PointLights().front().positionRadius : XMFLOAT4(0, 0, 0, 30);
     const auto pointMatrices = PointShadowMatrices(
         XMFLOAT3(pointLightPositionRange.x, pointLightPositionRange.y, pointLightPositionRange.z),
         pointLightPositionRange.w);
@@ -579,26 +512,29 @@ void DrawFrame(float dt)
         }
         g_shadowMap.TransitionToShaderResource(g_cmdList.Get());
 
-        g_pointShadowMap.TransitionToRenderTarget(g_cmdList.Get());
-        D3D12_VIEWPORT pointViewport{};
-        pointViewport.Width = static_cast<float>(PointShadowMap::Resolution);
-        pointViewport.Height = static_cast<float>(PointShadowMap::Resolution);
-        pointViewport.MaxDepth = 1.0f;
-        D3D12_RECT pointScissor{0, 0, static_cast<LONG>(PointShadowMap::Resolution), static_cast<LONG>(PointShadowMap::Resolution)};
-        g_cmdList->RSSetViewports(1, &pointViewport);
-        g_cmdList->RSSetScissorRects(1, &pointScissor);
-        for (UINT face = 0; face < PointShadowMap::FaceCount; ++face)
+        if (hasPointLight)
         {
-            const auto rtv = g_pointShadowMap.Rtv(face);
-            const auto dsv = g_pointShadowMap.Dsv(face);
-            constexpr float clearDistance[] = {1.0f, 0.0f, 0.0f, 0.0f};
-            g_cmdList->ClearRenderTargetView(rtv, clearDistance, 0, nullptr);
-            g_cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-            g_cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
-            g_sceneRenderer.DrawPointShadow(g_cmdList.Get(), g_shadowRootSignature.Get(), g_pointShadowPipeline.Get(),
-                pointMatrices[face], face, pointLightPositionRange);
+            g_pointShadowMap.TransitionToRenderTarget(g_cmdList.Get());
+            D3D12_VIEWPORT pointViewport{};
+            pointViewport.Width = static_cast<float>(PointShadowMap::Resolution);
+            pointViewport.Height = static_cast<float>(PointShadowMap::Resolution);
+            pointViewport.MaxDepth = 1.0f;
+            D3D12_RECT pointScissor{0, 0, PointShadowMap::Resolution, PointShadowMap::Resolution};
+            g_cmdList->RSSetViewports(1, &pointViewport);
+            g_cmdList->RSSetScissorRects(1, &pointScissor);
+            for (UINT face = 0; face < PointShadowMap::FaceCount; ++face)
+            {
+                const auto rtv = g_pointShadowMap.Rtv(face);
+                const auto dsv = g_pointShadowMap.Dsv(face);
+                constexpr float clearDistance[] = {1.0f, 0.0f, 0.0f, 0.0f};
+                g_cmdList->ClearRenderTargetView(rtv, clearDistance, 0, nullptr);
+                g_cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+                g_cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+                g_sceneRenderer.DrawPointShadow(g_cmdList.Get(), g_shadowRootSignature.Get(),
+                    g_pointShadowPipeline.Get(), pointMatrices[face], face, pointLightPositionRange);
+            }
+            g_pointShadowMap.TransitionToShaderResource(g_cmdList.Get());
         }
-        g_pointShadowMap.TransitionToShaderResource(g_cmdList.Get());
     }
 
     GBuffer& gb = g_renderSys.GBufferTargets();
@@ -616,10 +552,20 @@ void DrawFrame(float dt)
     g_cmdList->RSSetScissorRects(1, &scissor);
 
     DrawScene(viewProj);
-    g_sceneObjectRenderer.DrawLightMarker(
+    if (hasPointLight) g_sceneObjectRenderer.DrawLightMarker(
         g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineGeoMarker.Get(),
         viewProj, g_camPos,
-        XMFLOAT3(pointLightPositionRange.x, pointLightPositionRange.y, pointLightPositionRange.z), g_appTime);
+        XMFLOAT3(pointLightPositionRange.x, pointLightPositionRange.y, pointLightPositionRange.z),
+        XMFLOAT3(g_renderSys.PointLights().front().colorIntensity.x,
+            g_renderSys.PointLights().front().colorIntensity.y, g_renderSys.PointLights().front().colorIntensity.z), g_appTime);
+    // The overview observes the primary camera's selection, not its own frustum.
+    const auto& selectionEye = g_terrainMode ? g_otherCamPos : g_camPos;
+    const XMMATRIX selectionVp = g_terrainMode
+        ? Camera::ViewProjection(g_otherCamPos, g_otherCamYaw, g_otherCamPitch,
+            g_width, g_height, 0.1f, 5000.0f)
+        : viewProj;
+    g_terrain.Draw(g_cmdList.Get(), viewProj, selectionVp, selectionEye, g_height,
+        g_wireframeEnabled, g_terrainCulling, g_terrainLodColors);
     UpdateWindowTitle();
 
     gb.TransitionToShaderResource(g_cmdList.Get());
@@ -633,10 +579,8 @@ void DrawFrame(float dt)
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(g_frameIndex) * g_rtvDescriptorSize;
 
-    XMFLOAT3 camForward{};
-    XMStoreFloat3(&camForward, Camera::Forward(g_camYaw, g_camPitch));
     g_renderSys.UploadFrameConstants(
-        g_camPos, camForward, viewProj, g_width, g_height, g_appTime,
+        g_camPos, viewProj, g_width, g_height,
         cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView, g_cascadeColorDebug,
         g_vignetteEnabled, g_flyEyeEnabled, g_shadowMapDebugIndex);
     g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), g_width, g_height);
@@ -655,6 +599,86 @@ void DrawFrame(float dt)
     const UINT64 signalValue = ++g_fenceValue;
     ThrowIfFailed(g_queue->Signal(g_fence.Get(), signalValue));
     g_frameFenceValues[g_frameIndex] = signalValue;
+}
+
+bool RunTerrainSmoke()
+{
+    const auto output = std::filesystem::path(AppPaths::ExecutableDirectory());
+    std::wofstream log(output / L"terrain-check.txt", std::ios::app);
+    std::wstring error;
+    std::vector<uint8_t> culled, unculled, preview;
+    auto capture = [&](std::vector<uint8_t>& image) {
+        if (TerrainChecks::Capture(g_d3d, g_frameIndex, g_width, g_height, image, error)) return true;
+        log << L"FAIL: " << error << L"\n"; return false;
+    };
+    DrawFrame(0); DrawFrame(0); // let hysteresis settle at the initial view
+    if (!capture(preview) || g_terrain.Statistics().patches == 0) {
+        log << L"FAIL: initial terrain view is empty\n"; return false;
+    }
+    TerrainChecks::SavePpm(output / L"terrain-preview.ppm", g_width, g_height, preview);
+    const auto observerStats = g_terrain.Statistics();
+    const auto observerPosition = g_camPos;
+    g_camPos.x += 10;
+    DrawFrame(0); DrawFrame(0);
+    if (g_terrain.Statistics().patches != observerStats.patches ||
+        g_terrain.Statistics().levels != observerStats.levels ||
+        g_terrain.Statistics().culled != observerStats.culled) {
+        log << L"FAIL: observer camera changes primary selection\n"; return false;
+    }
+    g_camPos = observerPosition;
+    DrawFrame(0);
+    if (!capture(culled)) return false;
+    g_terrainCulling = false; DrawFrame(0);
+    if (!capture(unculled) || culled == unculled ||
+        g_terrain.Statistics().patches <= observerStats.patches) {
+        log << L"FAIL: observer cannot see primary frustum removal\n"; return false;
+    }
+    g_terrainCulling = true;
+    log << L"PASS: observer movement preserves primary selection; C reveals removed terrain.\n";
+    // Next compare identical images from the primary view, where culling
+    // must only remove geometry outside the rendered frustum.
+    g_terrainMode = false;
+    const auto initialPosition = g_camPos;
+    const float initialYaw = g_camYaw, initialPitch = g_camPitch;
+    // The overview can contain the whole map. Test culling from a closer
+    // view where some patches deliberately extend past the screen edges.
+    g_camPos = {0, 420, -820}; g_camYaw = 0; g_camPitch = 0.40f;
+    DrawFrame(0); DrawFrame(0);
+    if (!capture(culled)) return false;
+    const auto stats = g_terrain.Statistics();
+    if (stats.patches == 0 || stats.culled == 0) { log << L"FAIL: no visible terrain or no culling\n"; return false; }
+    g_terrainCulling = false;
+    DrawFrame(0);
+    if (!capture(unculled)) return false;
+    if (unculled != culled || g_terrain.Statistics().patches < stats.patches) {
+        log << L"FAIL: culling changes the visible image\n"; return false;
+    }
+    log << L"PASS: culling preserves the rendered image; tiles " << stats.patches
+        << L" vs " << g_terrain.Statistics().patches << L" with culling disabled.\n";
+    g_terrainCulling = true;
+    g_wireframeEnabled = true; DrawFrame(0); g_wireframeEnabled = false;
+    g_terrainLodColors = true; DrawFrame(0);
+    if (!capture(preview)) return false;
+    TerrainChecks::SavePpm(output / L"terrain-lod.ppm", g_width, g_height, preview);
+    g_terrainLodColors = false;
+    g_terrainMode = true;
+    const auto terrainPosition = g_camPos;
+    SwitchScene(); DrawFrame(0); SwitchScene(); DrawFrame(0);
+    if (g_camPos.x != terrainPosition.x || g_camPos.y != terrainPosition.y || g_camPos.z != terrainPosition.z) {
+        log << L"FAIL: scene switching loses the terrain camera\n"; return false;
+    }
+    ResizeSwapChain(640, 360); DrawFrame(0);
+    if (!capture(preview) || preview.size() != 640 * 360 * 4 || g_terrain.Statistics().patches == 0) {
+        log << L"FAIL: resized terrain\n"; return false;
+    }
+    ResizeSwapChain(kClientW, kClientH);
+    g_camPos = initialPosition; g_camYaw = initialYaw; g_camPitch = initialPitch;
+    DrawFrame(0);
+    g_d3d.WaitForGpu();
+    const UINT errors = TerrainChecks::GpuErrors(g_device.Get());
+    log << L"PASS: solid/wireframe/LOD colors, scene switching, resize 640x360 and back.\n";
+    log << L"GPU errors: " << errors << L"; triangles in initial view: " << stats.triangles << L"\n";
+    return errors == 0;
 }
 
 void InitD3D(HWND hwnd)
@@ -747,11 +771,16 @@ void InitD3D(HWND hwnd)
     {
         MessageBoxW(
             hwnd,
-            L"Не удалось загрузить PBR-модель Cerberus из assets/models/cerberus.",
+            L"Не удалось загрузить сцену Sponza (sponza.obj).",
             L"SecondSem CG — ошибка загрузки сцены",
             MB_OK | MB_ICONERROR);
         std::exit(EXIT_FAILURE);
     }
+    g_terrain.Initialize(g_device.Get(), g_queue.Get(),
+        std::filesystem::path(AppPaths::ExecutableDirectory()) / L"assets/terrain/canyon",
+        std::filesystem::path(AppPaths::ExecutableDirectory()) / L"Terrain.hlsl", g_terrainError);
+    // Additional lights are supplied here without changing the shader.
+    g_renderSys.SetPointLights({{ScenePointLight(), XMFLOAT4(1.0f, 0.62f, 0.22f, 6.0f)}});
 }
 
 void ShutdownD3D()
@@ -766,6 +795,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE)
             g_running = false;
+        else if (wp == VK_F2 && (lp & (1ll << 30)) == 0)
+        {
+            if (!g_terrain.Ready())
+                MessageBoxW(hwnd, g_terrainError.c_str(), L"Terrain loading error", MB_OK | MB_ICONERROR);
+            else SwitchScene();
+            UpdateWindowTitle();
+        }
+        else if (wp == 'C' && (lp & (1ll << 30)) == 0)
+        {
+            g_terrainCulling = !g_terrainCulling;
+            UpdateWindowTitle();
+        }
+        else if (wp == 'L' && (lp & (1ll << 30)) == 0)
+        {
+            g_terrainLodColors = !g_terrainLodColors;
+            UpdateWindowTitle();
+        }
         else if (wp == 'T' && (lp & (1ll << 30)) == 0)
         {
             g_tessellationEnabled = !g_tessellationEnabled;
@@ -774,11 +820,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (wp == 'R' && (lp & (1ll << 30)) == 0)
         {
             g_wireframeEnabled = !g_wireframeEnabled;
-            UpdateWindowTitle();
-        }
-        else if (wp == 'F' && (lp & (1ll << 30)) == 0)
-        {
-            g_frustumCullingEnabled = !g_frustumCullingEnabled;
             UpdateWindowTitle();
         }
         else if (wp == 'Y' && (lp & (1ll << 30)) == 0)
@@ -831,11 +872,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 {
     const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(coHr) && coHr != RPC_E_CHANGED_MODE)
         return static_cast<int>(coHr);
+
+    const bool checkOnly = wcsstr(commandLine, L"--terrain-check") != nullptr;
+    const bool smoke = wcsstr(commandLine, L"--terrain-smoke") != nullptr;
+    if (checkOnly || smoke) {
+        std::wstring error;
+        const bool valid = TerrainChecks::Assets(
+            std::filesystem::path(AppPaths::ExecutableDirectory()) / L"assets/terrain/canyon", error);
+        std::wofstream log(std::filesystem::path(AppPaths::ExecutableDirectory()) / L"terrain-check.txt");
+        log << (valid ? L"PASS: PNG16 precision, source dimensions, tile boundaries, quadtree coverage, distance LOD, frustum bounds, invalid input rejection.\n" : L"FAIL: ") << error << L"\n";
+        if (!valid || checkOnly) {
+            if (SUCCEEDED(coHr)) CoUninitialize();
+            return valid ? 0 : 1;
+        }
+    }
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -857,6 +912,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         return static_cast<int>(HRESULT_FROM_WIN32(GetLastError()));
 
     InitD3D(g_hwnd);
+    if (wcsstr(commandLine, L"--terrain")) {
+        if (!g_terrain.Ready()) {
+            std::wofstream log(std::filesystem::path(AppPaths::ExecutableDirectory()) / L"terrain-check.txt", std::ios::app);
+            log << L"FAIL: " << g_terrainError << L"\n";
+            ShutdownD3D(); DestroyWindow(g_hwnd);
+            if (SUCCEEDED(coHr)) CoUninitialize();
+            return 1;
+        }
+        SwitchScene();
+    }
+    if (smoke) {
+        const bool passed = RunTerrainSmoke();
+        ShutdownD3D(); DestroyWindow(g_hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        if (SUCCEEDED(coHr)) CoUninitialize();
+        return passed ? 0 : 1;
+    }
     UpdateWindowTitle();
     QueryPerformanceFrequency(&g_qpcFreq);
     QueryPerformanceCounter(&g_qpcLast);
@@ -890,6 +961,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         DrawFrame(dt);
     }
 
+    ClipCursor(nullptr);
     ShutdownD3D();
     DestroyWindow(g_hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);

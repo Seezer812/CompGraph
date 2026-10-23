@@ -359,14 +359,16 @@ bool LoadObj(const std::filesystem::path& objPath, LoadedMesh& out, std::wstring
     };
 
     auto addCorner = [&](int32_t vi, int32_t vti, int32_t vni) -> uint32_t {
-        VKey key{vi, vti, vni};
-        auto it = vertCache.find(key);
-        if (it != vertCache.end())
-            return it->second;
-
         const size_t pi = ResolveIndex(vi, positions.size());
         const size_t ni = (vni != 0) ? ResolveIndex(vni, normals.size()) : 0;
         const size_t ti = (vti != 0) ? ResolveIndex(vti, uvs.size()) : 0;
+        // Negative OBJ indices are relative to the arrays at this face.
+        VKey key{static_cast<int32_t>(pi + 1),
+            vti != 0 ? static_cast<int32_t>(ti + 1) : 0,
+            vni != 0 ? static_cast<int32_t>(ni + 1) : 0};
+        auto it = vertCache.find(key);
+        if (vni != 0 && it != vertCache.end())
+            return it->second;
 
         MeshVertex mv{};
         if (pi < positions.size())
@@ -375,7 +377,7 @@ bool LoadObj(const std::filesystem::path& objPath, LoadedMesh& out, std::wstring
             mv.py = positions[pi].y;
             mv.pz = positions[pi].z;
         }
-        if (ni < normals.size())
+        if (vni != 0 && ni < normals.size())
         {
             mv.nx = normals[ni].x;
             mv.ny = normals[ni].y;
@@ -387,7 +389,7 @@ bool LoadObj(const std::filesystem::path& objPath, LoadedMesh& out, std::wstring
             mv.ny = 1;
             mv.nz = 0;
         }
-        if (ti < uvs.size())
+        if (vti != 0 && ti < uvs.size())
         {
             mv.u = uvs[ti].x;
             mv.v = uvs[ti].y;
@@ -395,7 +397,7 @@ bool LoadObj(const std::filesystem::path& objPath, LoadedMesh& out, std::wstring
 
         const uint32_t idx = static_cast<uint32_t>(out.vertices.size());
         out.vertices.push_back(mv);
-        vertCache.emplace(key, idx);
+        if (vni != 0) vertCache.emplace(key, idx);
         return idx;
     };
 
@@ -458,11 +460,32 @@ bool LoadObj(const std::filesystem::path& objPath, LoadedMesh& out, std::wstring
             auto emitTri = [&](const std::string& a, const std::string& b, const std::string& c2) {
                 int32_t vi, vti, vni;
                 SplitFaceToken(a, vi, vti, vni);
+                const bool normalA = vni != 0;
                 const uint32_t ia = addCorner(vi, vti, vni);
                 SplitFaceToken(b, vi, vti, vni);
+                const bool normalB = vni != 0;
                 const uint32_t ib = addCorner(vi, vti, vni);
                 SplitFaceToken(c2, vi, vti, vni);
+                const bool normalC = vni != 0;
                 const uint32_t ic = addCorner(vi, vti, vni);
+                if (!normalA || !normalB || !normalC)
+                {
+                    const auto position = [&](uint32_t i) {
+                        const auto& v = out.vertices[i];
+                        return XMVectorSet(v.px, v.py, v.pz, 0);
+                    };
+                    const XMVECTOR cross = XMVector3Cross(position(ib) - position(ia), position(ic) - position(ia));
+                    XMFLOAT3 faceNormal{0, 1, 0};
+                    if (XMVectorGetX(XMVector3LengthSq(cross)) > 1e-12f)
+                        XMStoreFloat3(&faceNormal, XMVector3Normalize(cross));
+                    auto setNormal = [&](uint32_t i) {
+                        auto& v = out.vertices[i];
+                        v.nx = faceNormal.x; v.ny = faceNormal.y; v.nz = faceNormal.z;
+                    };
+                    if (!normalA) setNormal(ia);
+                    if (!normalB) setNormal(ib);
+                    if (!normalC) setNormal(ic);
+                }
                 curIndices.push_back(ia);
                 curIndices.push_back(ib);
                 curIndices.push_back(ic);

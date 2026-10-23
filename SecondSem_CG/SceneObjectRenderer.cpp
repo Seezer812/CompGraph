@@ -1,4 +1,5 @@
 #include "SceneObjectRenderer.h"
+#include "D3D12Context.h"
 
 #include "ObjLoader.h"
 
@@ -12,16 +13,14 @@ using namespace DirectX;
 namespace
 {
 constexpr UINT kCbAlignment = 256;
-constexpr UINT kSpatialObjectCount = 2000;
-constexpr UINT kMaxObjects = kSpatialObjectCount;
+constexpr UINT kMarkerSlotsPerFrame = 12; // ten shadow slots, frame slot, material slot
 constexpr UINT kSphereSlices = 12;
 constexpr UINT kSphereStacks = 8;
 
 const XMMATRIX& DebugCubeWorld()
 {
-    // Sponza is rotated around X, therefore negative Y is visually upward.
     static const XMMATRIX world = XMMatrixScaling(1.15f, 1.15f, 1.15f) *
-        XMMatrixTranslation(0.0f, -2.0f, 0.0f);
+        XMMatrixTranslation(0.0f, 2.0f, 0.0f);
     return world;
 }
 
@@ -47,7 +46,8 @@ struct alignas(256) EmissiveMaterialConstants
     UINT hasNormalMap = 0;
     UINT hasDisplacementMap = 0;
     UINT enableTessellation = 0;
-    float padding[46]{};
+    UINT isPbrMaterial = 0;
+    float padding[45]{};
 };
 
 struct ShadowConstants
@@ -88,6 +88,7 @@ HRESULT CreateUploadBuffer(ID3D12Device* device, const void* source, UINT64 size
 
 HRESULT SceneObjectRenderer::Initialize(ID3D12Device* device)
 {
+    m_device = device;
     HRESULT hr = S_OK;
     std::vector<Obj::MeshVertex> sphereVertices;
     std::vector<uint32_t> sphereIndices;
@@ -113,6 +114,30 @@ HRESULT SceneObjectRenderer::Initialize(ID3D12Device* device)
         }
     if (FAILED(hr = CreateUploadBuffer(device, sphereVertices.data(), sphereVertices.size() * sizeof(Obj::MeshVertex), m_sphereVertexBuffer))) return hr;
     if (FAILED(hr = CreateUploadBuffer(device, sphereIndices.data(), sphereIndices.size() * sizeof(uint32_t), m_sphereIndexBuffer))) return hr;
+    m_objectCapacity = static_cast<UINT>(m_spatialObjects.Objects().size());
+    if (m_objectCapacity != 0 && FAILED(hr = CreateUploadBuffer(device, nullptr,
+        D3D12Context::FrameCount * 2ull * m_objectCapacity * kCbAlignment, m_frameConstants))) return hr;
+    if (FAILED(hr = CreateUploadBuffer(device, nullptr, D3D12Context::FrameCount * kMarkerSlotsPerFrame * kCbAlignment, m_markerConstants))) return hr;
+    if (FAILED(hr = CreateUploadBuffer(device, nullptr, kCbAlignment, m_materialConstants))) return hr;
+
+    m_sphereVertexView = {m_sphereVertexBuffer->GetGPUVirtualAddress(), static_cast<UINT>(sphereVertices.size() * sizeof(Obj::MeshVertex)), sizeof(Obj::MeshVertex)};
+    m_sphereIndexView = {m_sphereIndexBuffer->GetGPUVirtualAddress(), static_cast<UINT>(sphereIndices.size() * sizeof(uint32_t)), DXGI_FORMAT_R32_UINT};
+    m_sphereIndexCount = static_cast<UINT>(sphereIndices.size());
+    D3D12_RANGE readRange{0, 0};
+    if (m_frameConstants && FAILED(hr = m_frameConstants->Map(0, &readRange, reinterpret_cast<void**>(&m_frameConstantsMapped)))) return hr;
+    if (FAILED(hr = m_markerConstants->Map(0, &readRange, reinterpret_cast<void**>(&m_markerConstantsMapped)))) return hr;
+    EmissiveMaterialConstants material{};
+    void* mapped = nullptr;
+    if (FAILED(hr = m_materialConstants->Map(0, &readRange, &mapped))) return hr;
+    std::memcpy(mapped, &material, sizeof(material));
+    m_materialConstants->Unmap(0, nullptr);
+    return S_OK;
+}
+
+HRESULT SceneObjectRenderer::EnsureDebugCubeGeometry()
+{
+    if (m_cubeVertexBuffer && m_cubeIndexBuffer) return S_OK;
+    HRESULT hr = S_OK;
     const std::array<Obj::MeshVertex, 24> cubeVertices = {{
         {-1,-1, 1, 0, 0, 1, 0,1}, { 1,-1, 1, 0, 0, 1, 1,1}, { 1, 1, 1, 0, 0, 1, 1,0}, {-1, 1, 1, 0, 0, 1, 0,0},
         { 1,-1,-1, 0, 0,-1, 0,1}, {-1,-1,-1, 0, 0,-1, 1,1}, {-1, 1,-1, 0, 0,-1, 1,0}, { 1, 1,-1, 0, 0,-1, 0,0},
@@ -125,28 +150,12 @@ HRESULT SceneObjectRenderer::Initialize(ID3D12Device* device)
         0,1,2, 0,2,3, 4,5,6, 4,6,7, 8,9,10, 8,10,11,
         12,13,14, 12,14,15, 16,17,18, 16,18,19, 20,21,22, 20,22,23,
     }};
-    if (FAILED(hr = CreateUploadBuffer(device, cubeVertices.data(), sizeof(cubeVertices), m_cubeVertexBuffer))) return hr;
-    if (FAILED(hr = CreateUploadBuffer(device, cubeIndices.data(), sizeof(cubeIndices), m_cubeIndexBuffer))) return hr;
+    if (FAILED(hr = CreateUploadBuffer(m_device.Get(), cubeVertices.data(), sizeof(cubeVertices), m_cubeVertexBuffer))) return hr;
+    if (FAILED(hr = CreateUploadBuffer(m_device.Get(), cubeIndices.data(), sizeof(cubeIndices), m_cubeIndexBuffer))) return hr;
 
-    if (FAILED(hr = CreateUploadBuffer(device, nullptr, 2ull * kMaxObjects * kCbAlignment, m_frameConstants))) return hr;
-    if (FAILED(hr = CreateUploadBuffer(device, nullptr, 11 * kCbAlignment, m_markerConstants))) return hr;
-    if (FAILED(hr = CreateUploadBuffer(device, nullptr, kCbAlignment, m_materialConstants))) return hr;
-
-    m_sphereVertexView = {m_sphereVertexBuffer->GetGPUVirtualAddress(), static_cast<UINT>(sphereVertices.size() * sizeof(Obj::MeshVertex)), sizeof(Obj::MeshVertex)};
-    m_sphereIndexView = {m_sphereIndexBuffer->GetGPUVirtualAddress(), static_cast<UINT>(sphereIndices.size() * sizeof(uint32_t)), DXGI_FORMAT_R32_UINT};
-    m_sphereIndexCount = static_cast<UINT>(sphereIndices.size());
     m_cubeVertexView = {m_cubeVertexBuffer->GetGPUVirtualAddress(), static_cast<UINT>(sizeof(cubeVertices)), sizeof(Obj::MeshVertex)};
     m_cubeIndexView = {m_cubeIndexBuffer->GetGPUVirtualAddress(), static_cast<UINT>(sizeof(cubeIndices)), DXGI_FORMAT_R32_UINT};
     m_cubeIndexCount = static_cast<UINT>(cubeIndices.size());
-    D3D12_RANGE readRange{0, 0};
-    if (FAILED(hr = m_frameConstants->Map(0, &readRange, reinterpret_cast<void**>(&m_frameConstantsMapped)))) return hr;
-    if (FAILED(hr = m_markerConstants->Map(0, &readRange, reinterpret_cast<void**>(&m_markerConstantsMapped)))) return hr;
-    EmissiveMaterialConstants material{};
-    void* mapped = nullptr;
-    if (FAILED(hr = m_materialConstants->Map(0, &readRange, &mapped))) return hr;
-    std::memcpy(mapped, &material, sizeof(material));
-    m_materialConstants->Unmap(0, nullptr);
-    m_spatialObjects.Generate(kSpatialObjectCount);
     return S_OK;
 }
 
@@ -166,8 +175,8 @@ void SceneObjectRenderer::DrawCulledFromTopCamera(ID3D12GraphicsCommandList* com
     SpatialCulling::Stats ignoredStats{};
     const std::vector<uint32_t> visible = m_spatialObjects.FindVisible(
         mainViewProjection, frustumCulling, octreeCulling, ignoredStats);
-    const XMFLOAT3 topCameraPosition{0.0f, 48.0f, 0.0f};
-    DrawVisible(commandList, srvHeap, rootSignature, pipelineState, topViewProjection, topCameraPosition, timeSeconds, visible, kMaxObjects);
+    const XMFLOAT3 topCameraPosition{0.0f, 48.0f, 32.0f};
+    DrawVisible(commandList, srvHeap, rootSignature, pipelineState, topViewProjection, topCameraPosition, timeSeconds, visible, m_objectCapacity);
 }
 
 void SceneObjectRenderer::DrawVisible(ID3D12GraphicsCommandList* commandList, ID3D12DescriptorHeap* srvHeap,
@@ -192,8 +201,8 @@ void SceneObjectRenderer::DrawVisible(ID3D12GraphicsCommandList* commandList, ID
         XMStoreFloat4x4(&frame.viewProjection, viewProjection);
         frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z);
         const UINT frameSlot = constantBufferOffset + constantIndex;
-        std::memcpy(m_frameConstantsMapped + static_cast<size_t>(frameSlot) * kCbAlignment, &frame, sizeof(frame));
-        commandList->SetGraphicsRootConstantBufferView(0, m_frameConstants->GetGPUVirtualAddress() + static_cast<UINT64>(frameSlot) * kCbAlignment);
+        std::memcpy(m_frameConstantsMapped + m_frameIndex * 2ull * m_objectCapacity * kCbAlignment + static_cast<size_t>(frameSlot) * kCbAlignment, &frame, sizeof(frame));
+        commandList->SetGraphicsRootConstantBufferView(0, m_frameConstants->GetGPUVirtualAddress() + m_frameIndex * 2ull * m_objectCapacity * kCbAlignment + static_cast<UINT64>(frameSlot) * kCbAlignment);
         commandList->DrawIndexedInstanced(m_sphereIndexCount, 1, 0, 0, 0);
         ++constantIndex;
     }
@@ -230,8 +239,8 @@ void SceneObjectRenderer::DrawShadowCaster(ID3D12GraphicsCommandList* commandLis
         XMStoreFloat4x4(&frame.world, world);
         XMStoreFloat4x4(&frame.viewProjection, viewProjection);
         frame.timeCamera = XMFLOAT4(timeSeconds, 0, 0, 0);
-        std::memcpy(m_markerConstantsMapped + static_cast<size_t>(markerIndex) * kCbAlignment, &frame, sizeof(frame));
-        commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + static_cast<UINT64>(markerIndex) * kCbAlignment);
+        std::memcpy(m_markerConstantsMapped + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<size_t>(markerIndex) * kCbAlignment, &frame, sizeof(frame));
+        commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<UINT64>(markerIndex) * kCbAlignment);
         commandList->DrawIndexedInstanced(m_sphereIndexCount, 1, 0, 0, 0);
         ++markerIndex;
     }
@@ -241,6 +250,7 @@ void SceneObjectRenderer::DrawDebugCube(ID3D12GraphicsCommandList* commandList, 
     ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState, const XMMATRIX& viewProjection,
     const XMFLOAT3& cameraPosition, float timeSeconds)
 {
+    if (FAILED(EnsureDebugCubeGeometry())) return;
     // Slot 10 is deliberately separate from slots 0..9 used by shadow passes
     // draws.  The GPU executes this command list after it has all been built.
     constexpr UINT kGeometrySlot = 10;
@@ -248,13 +258,13 @@ void SceneObjectRenderer::DrawDebugCube(ID3D12GraphicsCommandList* commandList, 
     XMStoreFloat4x4(&frame.world, DebugCubeWorld());
     XMStoreFloat4x4(&frame.viewProjection, viewProjection);
     frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z);
-    std::memcpy(m_markerConstantsMapped + static_cast<size_t>(kGeometrySlot) * kCbAlignment, &frame, sizeof(frame));
+    std::memcpy(m_markerConstantsMapped + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<size_t>(kGeometrySlot) * kCbAlignment, &frame, sizeof(frame));
 
     ID3D12DescriptorHeap* heaps[] = {srvHeap};
     commandList->SetDescriptorHeaps(1, heaps);
     commandList->SetGraphicsRootSignature(rootSignature);
     commandList->SetPipelineState(pipelineState);
-    commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + static_cast<UINT64>(kGeometrySlot) * kCbAlignment);
+    commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<UINT64>(kGeometrySlot) * kCbAlignment);
     commandList->SetGraphicsRootConstantBufferView(1, m_materialConstants->GetGPUVirtualAddress());
     commandList->SetGraphicsRootDescriptorTable(2, srvHeap->GetGPUDescriptorHandleForHeapStart());
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -266,7 +276,7 @@ void SceneObjectRenderer::DrawDebugCube(ID3D12GraphicsCommandList* commandList, 
 void SceneObjectRenderer::DrawLightMarker(ID3D12GraphicsCommandList* commandList,
     ID3D12DescriptorHeap* srvHeap, ID3D12RootSignature* rootSignature,
     ID3D12PipelineState* pipelineState, const XMMATRIX& viewProjection,
-    const XMFLOAT3& cameraPosition, const XMFLOAT3& lightPosition, float timeSeconds)
+    const XMFLOAT3& cameraPosition, const XMFLOAT3& lightPosition, const XMFLOAT3& lightColor, float timeSeconds)
 {
     constexpr UINT kGeometrySlot = 10;
     FrameConstants frame{};
@@ -274,15 +284,20 @@ void SceneObjectRenderer::DrawLightMarker(ID3D12GraphicsCommandList* commandList
         XMMatrixTranslation(lightPosition.x, lightPosition.y, lightPosition.z));
     XMStoreFloat4x4(&frame.viewProjection, viewProjection);
     frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z);
-    std::memcpy(m_markerConstantsMapped + static_cast<size_t>(kGeometrySlot) * kCbAlignment, &frame, sizeof(frame));
+    EmissiveMaterialConstants material{};
+    material.kd = XMFLOAT4(lightColor.x, lightColor.y, lightColor.z, 1.0f);
+    constexpr UINT kMaterialSlot = 11;
+    const UINT materialSlot = m_frameIndex * kMarkerSlotsPerFrame + kMaterialSlot;
+    std::memcpy(m_markerConstantsMapped + static_cast<size_t>(materialSlot) * kCbAlignment, &material, sizeof(material));
+    std::memcpy(m_markerConstantsMapped + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<size_t>(kGeometrySlot) * kCbAlignment, &frame, sizeof(frame));
 
     ID3D12DescriptorHeap* heaps[] = {srvHeap};
     commandList->SetDescriptorHeaps(1, heaps);
     commandList->SetGraphicsRootSignature(rootSignature);
     commandList->SetPipelineState(pipelineState);
-    commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() +
+    commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment +
         static_cast<UINT64>(kGeometrySlot) * kCbAlignment);
-    commandList->SetGraphicsRootConstantBufferView(1, m_materialConstants->GetGPUVirtualAddress());
+    commandList->SetGraphicsRootConstantBufferView(1, m_markerConstants->GetGPUVirtualAddress() + static_cast<UINT64>(materialSlot) * kCbAlignment);
     commandList->SetGraphicsRootDescriptorTable(2, srvHeap->GetGPUDescriptorHandleForHeapStart());
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->IASetVertexBuffers(0, 1, &m_sphereVertexView);
@@ -294,14 +309,15 @@ void SceneObjectRenderer::DrawDebugCubeShadow(ID3D12GraphicsCommandList* command
     ID3D12RootSignature* shadowRootSignature, ID3D12PipelineState* shadowPipelineState,
     const XMMATRIX& lightViewProjection, UINT cascade)
 {
+    if (FAILED(EnsureDebugCubeGeometry())) return;
     ShadowConstants constants{};
     XMStoreFloat4x4(&constants.world, DebugCubeWorld());
     XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
-    std::memcpy(m_markerConstantsMapped + static_cast<size_t>(cascade) * kCbAlignment, &constants, sizeof(constants));
+    std::memcpy(m_markerConstantsMapped + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<size_t>(cascade) * kCbAlignment, &constants, sizeof(constants));
 
     commandList->SetGraphicsRootSignature(shadowRootSignature);
     commandList->SetPipelineState(shadowPipelineState);
-    commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + static_cast<UINT64>(cascade) * kCbAlignment);
+    commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<UINT64>(cascade) * kCbAlignment);
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->IASetVertexBuffers(0, 1, &m_cubeVertexView);
     commandList->IASetIndexBuffer(&m_cubeIndexView);
@@ -312,6 +328,7 @@ void SceneObjectRenderer::DrawDebugCubePointShadow(ID3D12GraphicsCommandList* co
     ID3D12RootSignature* shadowRootSignature, ID3D12PipelineState* shadowPipelineState,
     const XMMATRIX& lightViewProjection, UINT face, const XMFLOAT4& lightPositionRange)
 {
+    if (FAILED(EnsureDebugCubeGeometry())) return;
     if (face >= 6) return;
     constexpr UINT slot = 4;
     const UINT constantSlot = slot + face;
@@ -319,10 +336,10 @@ void SceneObjectRenderer::DrawDebugCubePointShadow(ID3D12GraphicsCommandList* co
     XMStoreFloat4x4(&constants.world, DebugCubeWorld());
     XMStoreFloat4x4(&constants.lightViewProjection, lightViewProjection);
     constants.lightPositionRange = lightPositionRange;
-    std::memcpy(m_markerConstantsMapped + static_cast<size_t>(constantSlot) * kCbAlignment, &constants, sizeof(constants));
+    std::memcpy(m_markerConstantsMapped + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<size_t>(constantSlot) * kCbAlignment, &constants, sizeof(constants));
     commandList->SetGraphicsRootSignature(shadowRootSignature);
     commandList->SetPipelineState(shadowPipelineState);
-    commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + static_cast<UINT64>(constantSlot) * kCbAlignment);
+    commandList->SetGraphicsRootConstantBufferView(0, m_markerConstants->GetGPUVirtualAddress() + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<UINT64>(constantSlot) * kCbAlignment);
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->IASetVertexBuffers(0, 1, &m_cubeVertexView);
     commandList->IASetIndexBuffer(&m_cubeIndexView);

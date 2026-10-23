@@ -12,7 +12,6 @@
 #include <cstdint>
 #include <cstring>
 #include <cwctype>
-#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -588,10 +587,11 @@ void WriteTexture2DSrv(
     ID3D12Resource* texture,
     ID3D12DescriptorHeap* srvHeap,
     UINT heapIndex,
-    UINT descriptorIncrement)
+    UINT descriptorIncrement,
+    bool srgb)
 {
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srv.Format = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;
@@ -620,7 +620,7 @@ bool CreateSolidTexture2D(
     rd.Height = 1;
     rd.DepthOrArraySize = 1;
     rd.MipLevels = 1;
-    rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    rd.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
     rd.SampleDesc.Count = 1;
 
     HRESULT hr = device->CreateCommittedResource(
@@ -674,7 +674,7 @@ bool CreateTexture2DFromFile(
     rd.Height = h;
     rd.DepthOrArraySize = 1;
     rd.MipLevels = 1;
-    rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    rd.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
     rd.SampleDesc.Count = 1;
 
     hr = device->CreateCommittedResource(

@@ -15,6 +15,8 @@
 class SceneRenderer
 {
 public:
+    // Select only after the corresponding GPU frame has completed.
+    void BeginFrame(UINT frameIndex) { m_frameIndex = frameIndex; m_nextFrameConstantSlot = 0; }
     bool Load(
         ID3D12Device* device,
         ID3D12CommandQueue* queue,
@@ -22,7 +24,8 @@ public:
         ID3D12GraphicsCommandList* uploadCommands,
         ID3D12DescriptorHeap* srvHeap,
         UINT srvDescriptorSize,
-        const std::filesystem::path& objPath);
+        const std::filesystem::path& objPath,
+        UINT materialSrvLimit);
 
     void Draw(
         ID3D12GraphicsCommandList* commandList,
@@ -57,6 +60,7 @@ public:
     bool IsReady() const { return m_ready; }
 
 private:
+    UINT m_frameIndex = 0;
     bool m_ready = false;
     bool m_isPbrModel = false;
     DirectX::XMFLOAT4X4 m_world{};
@@ -67,7 +71,6 @@ private:
     D3D12_INDEX_BUFFER_VIEW m_indexView{};
     std::vector<UINT> m_materialSrvBase;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_textures;
-    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_uploads;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_materialConstants;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_frameConstants;
     uint8_t* m_frameConstantsMapped = nullptr;

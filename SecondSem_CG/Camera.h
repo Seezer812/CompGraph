@@ -16,7 +16,8 @@ DirectX::XMMATRIX ViewProjection(
     float yaw,
     float pitch,
     UINT viewportWidth,
-    UINT viewportHeight);
+    UINT viewportHeight,
+    float nearPlane = NearPlane, float farPlane = FarPlane);
 
 void Update(
     HWND window,
@@ -24,6 +25,7 @@ void Update(
     DirectX::XMFLOAT3& position,
     float& yaw,
     float& pitch,
-    bool& wasRightMouseDown);
+    bool& wasRightMouseDown
+    );
 
 } // namespace Camera

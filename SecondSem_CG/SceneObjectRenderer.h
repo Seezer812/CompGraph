@@ -10,6 +10,8 @@
 class SceneObjectRenderer
 {
 public:
+    // Select only after the corresponding GPU frame has completed.
+    void BeginFrame(UINT frameIndex) { m_frameIndex = frameIndex; }
     HRESULT Initialize(ID3D12Device* device);
 
     void Draw(
@@ -64,6 +66,7 @@ public:
         const DirectX::XMMATRIX& viewProjection,
         const DirectX::XMFLOAT3& cameraPosition,
         const DirectX::XMFLOAT3& lightPosition,
+        const DirectX::XMFLOAT3& lightColor,
         float timeSeconds);
 
     void DrawDebugCubeShadow(
@@ -82,6 +85,9 @@ public:
         const DirectX::XMFLOAT4& lightPositionRange);
 
 private:
+    Microsoft::WRL::ComPtr<ID3D12Device> m_device;
+    HRESULT EnsureDebugCubeGeometry();
+    UINT m_frameIndex = 0;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_sphereVertexBuffer;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_sphereIndexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_sphereVertexView{};
@@ -94,6 +100,7 @@ private:
     UINT m_cubeIndexCount = 0;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_frameConstants;
     uint8_t* m_frameConstantsMapped = nullptr;
+    UINT m_objectCapacity = 0;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_markerConstants;
     uint8_t* m_markerConstantsMapped = nullptr;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_materialConstants;

@@ -9,7 +9,8 @@ cbuffer PostProcessCB : register(b0)
     float4 InvScreen_pad;
     uint VignetteEnabled;
     uint FlyEyeEnabled;
-    float2 Padding;
+    uint ToneMappingEnabled;
+    uint Padding;
 };
 
 struct FsOut
@@ -80,6 +81,15 @@ float4 PostProcessPS(FsOut input) : SV_Target0
     }
 
     float3 color = SceneColor.SampleLevel(LinearClampSampler, sceneUv, 0).rgb;
+    if (ToneMappingEnabled != 0)
+    {
+        // Reinhard tone mapping, followed by sRGB encoding for the UNORM backbuffer.
+        color = max(color, 0.0f);
+        color = color / (1.0f + color);
+        color = lerp(12.92f * color,
+            1.055f * pow(color, 1.0f / 2.4f) - 0.055f,
+            step(0.0031308f, color));
+    }
     color *= facetMask;
 
     if (VignetteEnabled != 0)

@@ -50,12 +50,13 @@ bool CreateTextureFromDds(
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& uploadKeep,
     std::wstring& error);
 
-// Запись SRV для уже созданной текстуры R8G8B8A_UNORM (повторное использование ресурса в другом слоте кучи).
+// Colour maps use sRGB views; numeric maps use linear UNORM views.
 void WriteTexture2DSrv(
     ID3D12Device* device,
     ID3D12Resource* texture,
     ID3D12DescriptorHeap* srvHeap,
     UINT heapIndex,
-    UINT descriptorIncrement);
+    UINT descriptorIncrement,
+    bool srgb = false);
 
 } // namespace Tex
