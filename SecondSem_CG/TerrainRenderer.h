@@ -15,7 +15,7 @@ public:
     const TerrainData::Stats& Statistics() const { return m_data.Statistics(); }
 private:
     TerrainData m_data;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_vertices, m_indices, m_color;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_vertices, m_indices, m_color, m_heightMap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_heap;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_root;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_solid, m_wire;

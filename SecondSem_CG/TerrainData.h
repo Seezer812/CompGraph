@@ -13,7 +13,7 @@ class TerrainData
 public:
     static constexpr uint32_t Grid = 32, Side = Grid + 1, MaxLevel = 5;
     static constexpr float WorldSize = 1024.0f, HeightScale = 512.0f, PixelError = 3.0f;
-    struct Vertex { DirectX::XMFLOAT3 position, normal; DirectX::XMFLOAT2 uv; };
+    struct Vertex { DirectX::XMFLOAT2 positionXZ, uv; float skirtDrop = 0; };
     struct Node {
         DirectX::XMFLOAT3 minimum{}, maximum{};
         std::array<int, 4> children{-1, -1, -1, -1};
@@ -38,6 +38,8 @@ public:
     const Stats& Statistics() const { return m_stats; }
     uint32_t Width() const { return m_width; }
     uint32_t HeightPixels() const { return m_height; }
+    const std::vector<uint16_t>& HeightSamples() const { return m_samples; }
+    bool HasSponzaSite() const { return m_sponzaSite; }
     static bool Outside(const Node& node, const DirectX::XMMATRIX& vp);
 
 private:

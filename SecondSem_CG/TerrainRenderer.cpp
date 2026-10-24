@@ -5,6 +5,7 @@
 #include "TextureUtil.h"
 #include "D3DHelpers.h"
 #include <d3dcompiler.h>
+#include <cstring>
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -20,7 +21,7 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
     };
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 1; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    heap.NumDescriptors = 2; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!check(device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&m_heap)), L"Cannot create terrain texture heap")) return false;
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> commands;
@@ -39,6 +40,47 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
         error = L"Color.png and HeightMap.png must have identical dimensions."; return false;
     }
     Tex::WriteTexture2DSrv(device, m_color.Get(), m_heap.Get(), 0, increment, true);
+    D3D12_HEAP_PROPERTIES heightHeap{}; heightHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC heightDesc{};
+    heightDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    heightDesc.Width = m_data.Width(); heightDesc.Height = m_data.HeightPixels();
+    heightDesc.DepthOrArraySize = 1; heightDesc.MipLevels = 1;
+    heightDesc.Format = DXGI_FORMAT_R16_UNORM; heightDesc.SampleDesc.Count = 1;
+    if (!check(device->CreateCommittedResource(&heightHeap, D3D12_HEAP_FLAG_NONE, &heightDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_heightMap)), L"Cannot create height texture")) return false;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 uploadSize = 0;
+    device->GetCopyableFootprints(&heightDesc, 0, 1, 0, &footprint, nullptr, nullptr, &uploadSize);
+    D3D12_HEAP_PROPERTIES uploadHeap{}; uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; uploadDesc.Width = uploadSize;
+    uploadDesc.Height = 1; uploadDesc.DepthOrArraySize = 1; uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1; uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> heightUpload;
+    if (!check(device->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&heightUpload)), L"Cannot create height upload buffer")) return false;
+    uint8_t* mapped = nullptr;
+    const D3D12_RANGE noRead{0, 0};
+    if (!check(heightUpload->Map(0, &noRead, reinterpret_cast<void**>(&mapped)), L"Cannot map height upload buffer")) return false;
+    for (UINT row = 0; row < m_data.HeightPixels(); ++row)
+        std::memcpy(mapped + footprint.Offset + size_t(row) * footprint.Footprint.RowPitch,
+            m_data.HeightSamples().data() + size_t(row) * m_data.Width(), size_t(m_data.Width()) * sizeof(uint16_t));
+    heightUpload->Unmap(0, nullptr);
+    D3D12_TEXTURE_COPY_LOCATION source{}; source.pResource = heightUpload.Get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; source.PlacedFootprint = footprint;
+    D3D12_TEXTURE_COPY_LOCATION target{}; target.pResource = m_heightMap.Get();
+    target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    commands->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+    auto heightBarrier = D3DHelpers::Transition(m_heightMap.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    commands->ResourceBarrier(1, &heightBarrier);
+    uploads.push_back(heightUpload);
+    D3D12_SHADER_RESOURCE_VIEW_DESC heightSrv{};
+    heightSrv.Format = DXGI_FORMAT_R16_UNORM; heightSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    heightSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    heightSrv.Texture2D.MipLevels = 1;
+    auto heightHandle = m_heap->GetCPUDescriptorHandleForHeapStart(); heightHandle.ptr += increment;
+    device->CreateShaderResourceView(m_heightMap.Get(), &heightSrv, heightHandle);
     if (!check(commands->Close(), L"Terrain upload close failed")) return false;
     ComPtr<ID3D12Fence> fence;
     if (!check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), L"Terrain upload fence failed")) return false;
@@ -62,14 +104,14 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
 
     D3D12_DESCRIPTOR_RANGE textureRange{};
     textureRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    textureRange.NumDescriptors = 1;
+    textureRange.NumDescriptors = 2;
     D3D12_ROOT_PARAMETER parameters[2]{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[0].Constants.Num32BitValues = 20;
+    parameters[0].Constants.Num32BitValues = 24;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[1].DescriptorTable = {1, &textureRange};
-    parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -97,9 +139,10 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
         if (diagnostics) OutputDebugStringA(static_cast<const char*>(diagnostics->GetBufferPointer())); return false;
     }
     const D3D12_INPUT_ELEMENT_DESC layout[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32_FLOAT, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
+    static_assert(sizeof(TerrainData::Vertex) == 20);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};
     p.pRootSignature = m_root.Get();
     p.VS = {vs->GetBufferPointer(), vs->GetBufferSize()}; p.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
@@ -138,16 +181,17 @@ void TerrainRenderer::Draw(ID3D12GraphicsCommandList* cmd, const XMMATRIX& vp,
     cmd->SetPipelineState(wireframe ? m_wire.Get() : m_solid.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->IASetVertexBuffers(0, 1, &m_vertexView); cmd->IASetIndexBuffer(&m_indexView);
-    struct Constants { XMFLOAT4X4 vp; XMFLOAT4 color; } constants;
-    static_assert(sizeof(Constants) == 80);
+    struct Constants { XMFLOAT4X4 vp; XMFLOAT4 color, terrainSettings; } constants;
+    static_assert(sizeof(Constants) == 96);
     XMStoreFloat4x4(&constants.vp, vp);
+    constants.terrainSettings = {TerrainData::WorldSize, TerrainData::HeightScale, m_data.HasSponzaSite() ? 1.0f : 0.0f, 0};
     constexpr XMFLOAT3 colors[] = {{0.8f,0.15f,0.15f},{0.9f,0.5f,0.1f},{0.8f,0.8f,0.1f},
         {0.1f,0.7f,0.2f},{0.1f,0.5f,0.9f},{0.65f,0.15f,0.8f}};
     for (int index : m_data.Selected()) {
         const auto& node = m_data.Nodes()[index];
         const auto c = colors[node.level];
         constants.color = {c.x, c.y, c.z, lodColors ? 1.0f : 0.0f};
-        cmd->SetGraphicsRoot32BitConstants(0, 20, &constants, 0);
+        cmd->SetGraphicsRoot32BitConstants(0, 24, &constants, 0);
         cmd->DrawIndexedInstanced(UINT(m_data.Indices().size()), 1, 0, node.baseVertex, 0);
     }
 }

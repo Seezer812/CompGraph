@@ -118,13 +118,8 @@ int TerrainData::BuildNode(uint32_t x, uint32_t z, uint32_t span, uint32_t level
     for (uint32_t gz = 0; gz <= Grid; ++gz)
         for (uint32_t gx = 0; gx <= Grid; ++gx) {
             const float sx = float(x + gx * step), sz = float(z + gz * step);
-            constexpr float normalStep = WorldSize / 1023.0f;
-            XMFLOAT3 normal;
-            XMStoreFloat3(&normal, XMVector3Normalize(XMVectorSet(
-                Height(sx - normalStep, sz) - Height(sx + normalStep, sz), 2 * normalStep,
-                Height(sx, sz - normalStep) - Height(sx, sz + normalStep), 0)));
-            m_vertices.push_back({{sx - WorldSize / 2, Height(sx, sz), sz - WorldSize / 2},
-                normal, {sx / WorldSize, sz / WorldSize}});
+            m_vertices.push_back({{sx - WorldSize / 2, sz - WorldSize / 2},
+                {sx / WorldSize, sz / WorldSize}, 0});
         }
     for (uint32_t edge = 0; edge < 4; ++edge)
         for (uint32_t t = 0; t <= Grid; ++t) {
@@ -135,7 +130,7 @@ int TerrainData::BuildNode(uint32_t x, uint32_t z, uint32_t span, uint32_t level
             // degenerate instead of drawing a tall wall around the world.
             const bool outer = (edge == 0 && z == 0) || (edge == 1 && z + span == uint32_t(WorldSize))
                 || (edge == 2 && x == 0) || (edge == 3 && x + span == uint32_t(WorldSize));
-            if (!outer) v.position.y -= m_skirtDepth;
+            if (!outer) v.skirtDrop = m_skirtDepth;
             m_vertices.push_back(v);
         }
     const int index = int(m_nodes.size());
@@ -226,11 +221,11 @@ bool TerrainData::Validate(std::wstring& error)
         for (uint32_t z = 0; z <= Grid; ++z)
             for (uint32_t x = 0; x <= Grid; ++x) {
                 const auto& v = m_vertices[node.baseVertex + z * Side + x];
-                if (v.position.y < node.minimum.y || v.position.y > node.maximum.y)
+                const float height = Height(v.uv.x * WorldSize, v.uv.y * WorldSize);
+                if (height < node.minimum.y || height > node.maximum.y)
                     return fail(L"Vertex outside its culling bounds");
             }
         if (node.level == MaxLevel) continue;
-        // All siblings' shared positions, heights, normals and UVs must match.
         for (uint32_t child = 0; child < 4; ++child)
             for (uint32_t t = 0; t <= Grid; ++t) {
                 const auto& a = m_nodes[node.children[child]];
@@ -238,16 +233,16 @@ bool TerrainData::Validate(std::wstring& error)
                     const auto& b = m_nodes[node.children[child + 1]];
                     const auto& va = m_vertices[a.baseVertex + t * Side + Grid];
                     const auto& vb = m_vertices[b.baseVertex + t * Side];
-                    if (va.position.x != vb.position.x || va.position.y != vb.position.y || va.position.z != vb.position.z
-                        || va.uv.x != vb.uv.x || va.uv.y != vb.uv.y || va.normal.x != vb.normal.x || va.normal.z != vb.normal.z)
+                    if (va.positionXZ.x != vb.positionXZ.x || va.positionXZ.y != vb.positionXZ.y
+                        || va.uv.x != vb.uv.x || va.uv.y != vb.uv.y)
                         return fail(L"Horizontal tile edge mismatch");
                 }
                 if (child < 2) {
                     const auto& b = m_nodes[node.children[child + 2]];
                     const auto& va = m_vertices[a.baseVertex + Grid * Side + t];
                     const auto& vb = m_vertices[b.baseVertex + t];
-                    if (va.position.x != vb.position.x || va.position.y != vb.position.y || va.position.z != vb.position.z
-                        || va.uv.x != vb.uv.x || va.uv.y != vb.uv.y || va.normal.x != vb.normal.x || va.normal.z != vb.normal.z)
+                    if (va.positionXZ.x != vb.positionXZ.x || va.positionXZ.y != vb.positionXZ.y
+                        || va.uv.x != vb.uv.x || va.uv.y != vb.uv.y)
                         return fail(L"Vertical tile edge mismatch");
                 }
             }
