@@ -1,11 +1,14 @@
 // Geometry pass: fills albedo, normal and depth G-buffer targets.
 
+#include "TemporalMotion.hlsli"
+
 cbuffer FrameCB : register(b0)
 {
     row_major float4x4 World;
     row_major float4x4 ViewProj;
     float4 TimeCamPos;
     float4 UvAnimAndPad;
+    row_major float4x4 PreviousWorld;
 };
 
 cbuffer MatCB : register(b1)
@@ -31,13 +34,17 @@ Texture2D DisplacementMap : register(t3);
 SamplerState Samp : register(s0);
 
 struct GeoVsIn { float3 pos : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
-struct GeoVsOut { float4 clipPos : SV_POSITION; float3 nrmW : NORMAL; float3 posW : POSITION0; float2 uv : TEXCOORD0; };
+struct GeoVsOut { float4 clipPos : SV_POSITION; float3 nrmW : NORMAL; float3 posW : POSITION0; float2 uv : TEXCOORD0; float4 currentClip : TEXCOORD1; float4 previousClip : TEXCOORD2; };
 
 GeoVsOut GeometryVS(GeoVsIn input)
 {
     GeoVsOut output;
     float4 worldPosition = mul(float4(input.pos, 1.0f), World);
-    output.clipPos = mul(worldPosition, ViewProj);
+    output.currentClip = mul(worldPosition, ViewProj);
+    output.clipPos = ApplyTemporalJitter(output.currentClip);
+    float4 previousWorldPosition = UvAnimAndPad.w != 0
+        ? mul(float4(input.pos, 1.0f), PreviousWorld) : worldPosition;
+    output.previousClip = mul(previousWorldPosition, PreviousViewProjection);
     output.nrmW = normalize(mul(input.normal, (float3x3)World));
     output.posW = worldPosition.xyz;
     output.uv = input.uv;
@@ -84,7 +91,11 @@ GeoVsOut TessellationDS(TessFactors factors, const OutputPatch<GeoVsOut, 3> patc
     output.posW = patch[0].posW * bary.x + patch[1].posW * bary.y + patch[2].posW * bary.z;
     if (EnableTessellation && HasDisplacementMap)
         output.posW += output.nrmW * ((DisplacementMap.SampleLevel(Samp, output.uv, 0).r - 0.5f) * 0.10f);
-    output.clipPos = mul(float4(output.posW, 1.0f), ViewProj);
+    output.currentClip = mul(float4(output.posW, 1.0f), ViewProj);
+    output.clipPos = ApplyTemporalJitter(output.currentClip);
+    // These domain paths currently render static transforms; their final
+    // displaced position is used for camera motion.
+    output.previousClip = mul(float4(output.posW, 1.0f), PreviousViewProjection);
     return output;
 }
 
@@ -118,15 +129,20 @@ GeoVsOut WaveWallDS(QuadTessFactors factors, const OutputPatch<GeoVsOut, 4> patc
     const float amplitude = 0.22f;
     output.posW.z += amplitude * sin(phase);
     output.nrmW = normalize(float3(-amplitude * 2.1f * cos(phase), -amplitude * 1.35f * cos(phase), 1.0f));
-    output.clipPos = mul(float4(output.posW, 1.0f), ViewProj);
+    output.currentClip = mul(float4(output.posW, 1.0f), ViewProj);
+    output.clipPos = ApplyTemporalJitter(output.currentClip);
+    // These domain paths currently render static transforms; their final
+    // displaced position is used for camera motion.
+    output.previousClip = mul(float4(output.posW, 1.0f), PreviousViewProjection);
     return output;
 }
 
-struct GeoRtOut { float4 albedo : SV_Target0; float4 normal : SV_Target1; float depth : SV_Target2; };
+struct GeoRtOut { float4 albedo : SV_Target0; float4 normal : SV_Target1; float depth : SV_Target2; float2 motion : SV_Target3; };
 
 GeoRtOut GeometryPS(GeoVsOut input)
 {
     GeoRtOut output;
+    output.motion = TemporalMotionUV(input.currentClip, input.previousClip);
     float2 uv = input.uv * UvScale + UvOffset;
     if (UseUvAnim)
         uv += UvAnimAndPad.xy * TimeCamPos.x;

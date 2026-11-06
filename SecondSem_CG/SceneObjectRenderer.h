@@ -47,16 +47,17 @@ public:
         const DirectX::XMMATRIX& viewProjection,
         float timeSeconds);
 
-    // Неподвижный куб в центре зала: на нём удобно проверять CSM без влияния
-    // frustum- и octree-culling тестовых сфер.
-    void DrawDebugCube(
+    // Unlit geometry for inspecting motion independently of lighting.
+    void DrawMotionProbe(
         ID3D12GraphicsCommandList* commandList,
         ID3D12DescriptorHeap* srvHeap,
         ID3D12RootSignature* rootSignature,
         ID3D12PipelineState* pipelineState,
         const DirectX::XMMATRIX& viewProjection,
         const DirectX::XMFLOAT3& cameraPosition,
-        float timeSeconds);
+        float timeSeconds,
+        const DirectX::XMMATRIX& world,
+        const DirectX::XMMATRIX& previousWorld);
 
     void DrawLightMarker(
         ID3D12GraphicsCommandList* commandList,

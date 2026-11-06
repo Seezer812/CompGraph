@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 
 #include "GBuffer.h"
+#include "TemporalAA.h"
 #include "D3D12Context.h"
 #include "LightTiling.h"
 
@@ -34,7 +35,8 @@ public:
         UINT gbufferSrvStartIndex,
         UINT srvDescriptorIncrement,
         const wchar_t* deferredHlslPath,
-        const wchar_t* postProcessHlslPath);
+        const wchar_t* postProcessHlslPath,
+        const wchar_t* temporalHlslPath);
 
     void Resize(
         ID3D12Device* device,
@@ -68,13 +70,15 @@ public:
         ID3D12DescriptorHeap* srvHeapShaderVisible,
         D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
         UINT screenW,
-        UINT screenH);
+        UINT screenH,
+        bool showMotionVectors);
 
     bool LoadIbl(ID3D12Device* device, ID3D12CommandQueue* queue,
         ID3D12CommandAllocator* uploadAllocator, ID3D12GraphicsCommandList* uploadCommands,
         ID3D12DescriptorHeap* srvHeap, const std::filesystem::path& assetDirectory,
         const std::filesystem::path& cascadeTextureDirectory);
 
+    TemporalAA& Temporal() { return m_temporal; }
     GBuffer& GBufferTargets() { return m_gbuffer; }
 
 private:
@@ -97,6 +101,8 @@ private:
     void WriteDefaultLights();
 
     GBuffer m_gbuffer;
+    TemporalAA m_temporal;
+    void ResizeTemporalTargets(ID3D12Device* device, ID3D12DescriptorHeap* srvHeap, UINT width, UINT height);
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSigLight;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoLight;
@@ -116,6 +122,7 @@ private:
     UINT m_iblSrvBase = 0;
     UINT m_cascadeTextureSrvBase = 0;
     UINT m_postProcessSrvIndex = 0;
+    UINT m_motionSrvIndex = 0;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_iblTextures;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_iblUploads;
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, 4> m_cascadeTextures;

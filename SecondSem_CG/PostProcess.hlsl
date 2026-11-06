@@ -2,6 +2,7 @@
 // writes the final image to the swap-chain backbuffer.
 
 Texture2D SceneColor : register(t0);
+Texture2D<float2> Motion : register(t1);
 SamplerState LinearClampSampler : register(s0);
 
 cbuffer PostProcessCB : register(b0)
@@ -10,7 +11,7 @@ cbuffer PostProcessCB : register(b0)
     uint VignetteEnabled;
     uint FlyEyeEnabled;
     uint ToneMappingEnabled;
-    uint Padding;
+    uint ShowMotionVectors;
 };
 
 struct FsOut
@@ -32,6 +33,13 @@ FsOut PostProcessFullscreenVS(uint vertexId : SV_VertexID)
 
 float4 PostProcessPS(FsOut input) : SV_Target0
 {
+    if (ShowMotionVectors)
+    {
+        // Neutral grey means no motion. Red/green show signed X/Y;
+        // 16 pixels of motion saturates the corresponding channel.
+        float2 pixels = Motion.Load(int3(int2(input.pos.xy), 0)) / InvScreen_pad.xy;
+        return float4(saturate(0.5 + pixels / 32.0), 0.5, 1.0);
+    }
     float2 sceneUv = input.uv;
     float facetMask = 1.0f;
 

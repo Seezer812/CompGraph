@@ -90,7 +90,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-        <Command>copy /Y "$(ProjectDir)Terrain.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)PostProcess.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
+        <Command>copy /Y "$(ProjectDir)Terrain.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)PostProcess.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)TemporalResolve.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)TemporalMotion.hlsli" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -110,7 +110,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-        <Command>copy /Y "$(ProjectDir)Terrain.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)PostProcess.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
+        <Command>copy /Y "$(ProjectDir)Terrain.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)PostProcess.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)TemporalResolve.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)TemporalMotion.hlsli" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -128,7 +128,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-        <Command>copy /Y "$(ProjectDir)Terrain.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)PostProcess.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
+        <Command>copy /Y "$(ProjectDir)Terrain.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)PostProcess.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)TemporalResolve.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)TemporalMotion.hlsli" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -148,7 +148,7 @@
       <AdditionalLibraryDirectories>$(LibraryPath);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-        <Command>copy /Y "$(ProjectDir)Terrain.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)PostProcess.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
+        <Command>copy /Y "$(ProjectDir)Terrain.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)Shaders.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)GeometryPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)LightingPass.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)PostProcess.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)TemporalResolve.hlsl" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)TemporalMotion.hlsli" "$(OutDir)" &amp;&amp; copy /Y "$(ProjectDir)ShadowPass.hlsl" "$(OutDir)" &amp;&amp; xcopy /E /I /Y "$(ProjectDir)..\assets" "$(OutDir)assets"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -157,6 +157,7 @@
     <ClCompile Include="TextureUtil.cpp" />
     <ClCompile Include="GBuffer.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
+    <ClCompile Include="TemporalAA.cpp" />
     <ClCompile Include="Camera.cpp" />
     <ClCompile Include="SceneObjectRenderer.cpp" />
     <ClCompile Include="D3DHelpers.cpp" />
@@ -177,6 +178,8 @@
     <None Include="GeometryPass.hlsl" />
     <None Include="LightingPass.hlsl" />
     <None Include="PostProcess.hlsl" />
+    <None Include="TemporalResolve.hlsl" />
+    <None Include="TemporalMotion.hlsli" />
     <None Include="ShadowPass.hlsl" />
     <None Include="Terrain.hlsl" />
     <ClInclude Include="TerrainData.h" />
@@ -184,6 +187,7 @@
     <ClInclude Include="TerrainChecks.h" />
     <ClInclude Include="Camera.h" />
     <ClInclude Include="RenderingSystem.h" />
+    <ClInclude Include="TemporalAA.h" />
     <ClInclude Include="GBuffer.h" />
     <ClInclude Include="TextureUtil.h" />
     <ClInclude Include="ObjLoader.h" />

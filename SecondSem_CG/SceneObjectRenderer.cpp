@@ -13,7 +13,7 @@ using namespace DirectX;
 namespace
 {
 constexpr UINT kCbAlignment = 256;
-constexpr UINT kMarkerSlotsPerFrame = 12; // ten shadow slots, frame slot, material slot
+constexpr UINT kMarkerSlotsPerFrame = 13; // shadows 0..9, marker 10..11, motion probe 12
 constexpr UINT kSphereSlices = 12;
 constexpr UINT kSphereStacks = 8;
 
@@ -30,7 +30,8 @@ struct alignas(256) FrameConstants
     XMFLOAT4X4 viewProjection;
     XMFLOAT4 timeCamera;
     XMFLOAT4 uvAnimation;
-    float padding[24];
+    XMFLOAT4X4 previousWorld;
+    float padding[8];
 };
 
 struct alignas(256) EmissiveMaterialConstants
@@ -246,16 +247,17 @@ void SceneObjectRenderer::DrawShadowCaster(ID3D12GraphicsCommandList* commandLis
     }
 }
 
-void SceneObjectRenderer::DrawDebugCube(ID3D12GraphicsCommandList* commandList, ID3D12DescriptorHeap* srvHeap,
+void SceneObjectRenderer::DrawMotionProbe(ID3D12GraphicsCommandList* commandList, ID3D12DescriptorHeap* srvHeap,
     ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState, const XMMATRIX& viewProjection,
-    const XMFLOAT3& cameraPosition, float timeSeconds)
+    const XMFLOAT3& cameraPosition, float timeSeconds,
+    const XMMATRIX& world, const XMMATRIX& previousWorld)
 {
     if (FAILED(EnsureDebugCubeGeometry())) return;
-    // Slot 10 is deliberately separate from slots 0..9 used by shadow passes
-    // draws.  The GPU executes this command list after it has all been built.
-    constexpr UINT kGeometrySlot = 10;
+    constexpr UINT kGeometrySlot = 12;
     FrameConstants frame{};
-    XMStoreFloat4x4(&frame.world, DebugCubeWorld());
+    XMStoreFloat4x4(&frame.world, world);
+    XMStoreFloat4x4(&frame.previousWorld, previousWorld);
+    frame.uvAnimation.w = 1.0f;
     XMStoreFloat4x4(&frame.viewProjection, viewProjection);
     frame.timeCamera = XMFLOAT4(timeSeconds, cameraPosition.x, cameraPosition.y, cameraPosition.z);
     std::memcpy(m_markerConstantsMapped + m_frameIndex * static_cast<UINT64>(kMarkerSlotsPerFrame) * kCbAlignment + static_cast<size_t>(kGeometrySlot) * kCbAlignment, &frame, sizeof(frame));

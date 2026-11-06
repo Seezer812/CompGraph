@@ -1,3 +1,5 @@
+#include "TemporalMotion.hlsli"
+
 cbuffer Patch : register(b0)
 {
     row_major float4x4 ViewProjection;
@@ -34,13 +36,18 @@ struct VertexOut {
     float4 position : SV_POSITION;
     float3 normal : NORMAL;
     float2 uv : TEXCOORD0;
+    float4 currentClip : TEXCOORD1;
+    float4 previousClip : TEXCOORD2;
 };
 
 VertexOut TerrainVS(float2 positionXZ : POSITION, float2 uv : TEXCOORD0, float skirtDrop : TEXCOORD1)
 {
     VertexOut result;
-    float3 position = float3(positionXZ.x, TerrainHeight(uv) - skirtDrop, positionXZ.y);
-    result.position = mul(float4(position, 1), ViewProjection);
+    float4 position = float4(positionXZ.x, TerrainHeight(uv) - skirtDrop, positionXZ.y, 1);
+    // Both projections use the same GPU-displaced terrain vertex.
+    result.currentClip = mul(position, ViewProjection);
+    result.position = ApplyTemporalJitter(result.currentClip);
+    result.previousClip = mul(position, PreviousViewProjection);
     uint width, height;
     HeightMap.GetDimensions(width, height);
     float2 texel = 1.0 / float2(width - 1, height - 1);
@@ -57,6 +64,7 @@ struct GBufferOut {
     float4 albedo : SV_Target0;
     float4 normal : SV_Target1;
     float depth : SV_Target2;
+    float2 motion : SV_Target3;
 };
 GBufferOut TerrainPS(VertexOut input)
 {
@@ -68,5 +76,6 @@ GBufferOut TerrainPS(VertexOut input)
     result.albedo = float4(lerp(albedo, LodColor.rgb, LodColor.a), 0);
     result.normal = float4(normalize(input.normal), 0.9);
     result.depth = input.position.z;
+    result.motion = TemporalMotionUV(input.currentClip, input.previousClip);
     return result;
 }

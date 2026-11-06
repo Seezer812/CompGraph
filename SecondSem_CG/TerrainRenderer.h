@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "TerrainData.h"
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -10,7 +10,7 @@ public:
         const std::filesystem::path& directory, const std::filesystem::path& shader, std::wstring& error);
     void Draw(ID3D12GraphicsCommandList* cmd, const DirectX::XMMATRIX& vp,
         const DirectX::XMMATRIX& selectionVp, const DirectX::XMFLOAT3& selectionEye,
-        UINT height, bool wireframe, bool culling, bool lodColors);
+        D3D12_GPU_VIRTUAL_ADDRESS temporalCamera, UINT height, bool wireframe, bool culling, bool lodColors);
     bool Ready() const { return m_ready; }
     const TerrainData::Stats& Statistics() const { return m_data.Statistics(); }
 private:

@@ -1,4 +1,4 @@
-﻿// DirectX 12: окно, FPS-камера, сцена Sponza (OBJ/MTL).
+// DirectX 12: окно, FPS-камера, сцена Sponza (OBJ/MTL).
 
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -113,11 +113,40 @@ XMFLOAT3 g_camPos{5.2f, 0.3f, 0.0f};
 float g_camYaw = -XM_PIDIV2;
 float g_camPitch = 0.0f;
 bool g_camPrevRmb = false;
+bool g_showMotionVectors = false;
+
+struct MotionProbe
+{
+    bool enabled = false;
+    float elapsed = 0;
+    XMFLOAT3 center{}, axis{};
+    XMFLOAT4X4 previousWorld{};
+
+    XMMATRIX World() const
+    {
+        const float offset = 0.65f * sinf(elapsed * 2.4f);
+        return XMMatrixScaling(0.22f, 0.22f, 0.22f) *
+            XMMatrixTranslation(center.x + axis.x * offset, center.y, center.z + axis.z * offset);
+    }
+
+    void Toggle()
+    {
+        enabled = !enabled;
+        if (!enabled) return;
+        elapsed = 0;
+        XMStoreFloat3(&center, XMLoadFloat3(&g_camPos) + Camera::Forward(g_camYaw, g_camPitch) * 1.8f);
+        axis = {cosf(g_camYaw), 0, -sinf(g_camYaw)};
+        XMStoreFloat4x4(&previousWorld, World());
+    }
+};
+
+MotionProbe g_motionProbe;
 
 void SwitchScene()
 {
     if (!g_terrain.Ready()) return;
     g_terrainMode = !g_terrainMode;
+    g_renderSys.Temporal().Invalidate();
     std::swap(g_camPos, g_otherCamPos);
     std::swap(g_camYaw, g_otherCamYaw);
     std::swap(g_camPitch, g_otherCamPitch);
@@ -178,6 +207,12 @@ void UpdateWindowTitle()
 {
     if (!g_hwnd)
         return;
+    const auto& taa = g_renderSys.Temporal().GetSettings();
+    wchar_t temporalStatus[160]{};
+    swprintf_s(temporalStatus, L"F3 TAA %s | F4 vectors %s | F5 reprojection %s | F6 clamp %s | F7 probe %s | ",
+        taa.enabled ? L"ON" : L"OFF", g_showMotionVectors ? L"ON" : L"OFF",
+        taa.reproject ? L"ON" : L"OFF", taa.clampHistory ? L"ON" : L"OFF",
+        g_motionProbe.enabled ? L"ON" : L"OFF");
     if (g_terrainMode) {
         const auto& stats = g_terrain.Statistics();
         wchar_t title[512]{};
@@ -185,7 +220,7 @@ void UpdateWindowTitle()
             g_wireframeEnabled ? L"ON" : L"OFF", g_terrainLodColors ? L"ON" : L"OFF",
             g_terrainCulling ? L"ON" : L"OFF", stats.patches, stats.triangles, stats.culled,
             stats.levels[0], stats.levels[1], stats.levels[2], stats.levels[3], stats.levels[4], stats.levels[5]);
-        SetWindowTextW(g_hwnd, title);
+        SetWindowTextW(g_hwnd, (std::wstring(temporalStatus) + title).c_str());
         return;
     }
     wchar_t title[340]{};
@@ -200,7 +235,7 @@ void UpdateWindowTitle()
         g_vignetteEnabled ? L"ON" : L"OFF",
         g_tessellationEnabled ? L"ON" : L"OFF",
         g_wireframeEnabled ? L"ON" : L"OFF");
-    SetWindowTextW(g_hwnd, title);
+    SetWindowTextW(g_hwnd, (std::wstring(temporalStatus) + title).c_str());
 }
 
 void CreateSrvHeap()
@@ -222,7 +257,7 @@ void CreateGeometryPipeline()
     range.RegisterSpace = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    D3D12_ROOT_PARAMETER params[3]{};
+    D3D12_ROOT_PARAMETER params[4]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -236,6 +271,10 @@ void CreateGeometryPipeline()
     params[2].DescriptorTable.pDescriptorRanges = &range;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[3].Descriptor.ShaderRegister = 2;
+    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
     D3D12_STATIC_SAMPLER_DESC samp{};
     samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     samp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -247,7 +286,7 @@ void CreateGeometryPipeline()
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rs{};
-    rs.NumParameters = 3;
+    rs.NumParameters = _countof(params);
     rs.pParameters = params;
     rs.NumStaticSamplers = 1;
     rs.pStaticSamplers = &samp;
@@ -277,7 +316,7 @@ void CreateGeometryPipeline()
     pso.HS = {hs->GetBufferPointer(), hs->GetBufferSize()};
     pso.DS = {ds->GetBufferPointer(), ds->GetBufferSize()};
     pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
-    for (UINT rt = 0; rt < 3; ++rt)
+    for (UINT rt = 0; rt < GBuffer::TargetCount; ++rt)
         pso.BlendState.RenderTarget[rt].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
@@ -287,10 +326,11 @@ void CreateGeometryPipeline()
     pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     pso.SampleMask = UINT_MAX;
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
-    pso.NumRenderTargets = 3;
+    pso.NumRenderTargets = GBuffer::TargetCount;
     pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pso.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     pso.RTVFormats[2] = DXGI_FORMAT_R32_FLOAT;
+    pso.RTVFormats[3] = GBuffer::MotionFormat;
     pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pso.SampleDesc.Count = 1;
     pso.InputLayout = {layout, _countof(layout)};
@@ -483,6 +523,9 @@ void DrawFrame(float dt)
     Camera::Update(g_hwnd, dt, g_camPos, g_camYaw, g_camPitch, g_camPrevRmb);
     g_appTime += dt;
     const XMMATRIX viewProj = Camera::ViewProjection(g_camPos, g_camYaw, g_camPitch, g_width, g_height, 0.1f, 5000.0f);
+    auto& temporal = g_renderSys.Temporal();
+    const XMMATRIX rasterViewProj = temporal.BeginFrame(g_frameIndex, viewProj);
+    const auto temporalCamera = temporal.CameraConstants(g_frameIndex);
     const auto cascadeSplits = CascadeSplits();
     const auto cascadeMatrices = CascadeMatrices();
     const bool hasPointLight = !g_renderSys.PointLights().empty();
@@ -551,7 +594,18 @@ void DrawFrame(float dt)
     g_cmdList->RSSetViewports(1, &viewport);
     g_cmdList->RSSetScissorRects(1, &scissor);
 
+    g_cmdList->SetGraphicsRootSignature(g_rootSignature.Get());
+    g_cmdList->SetGraphicsRootConstantBufferView(3, temporalCamera);
     DrawScene(viewProj);
+    if (g_motionProbe.enabled)
+    {
+        g_motionProbe.elapsed += dt;
+        const XMMATRIX world = g_motionProbe.World();
+        g_sceneObjectRenderer.DrawMotionProbe(g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(),
+            g_pipelineGeoMarker.Get(), viewProj, g_camPos, g_appTime,
+            world, XMLoadFloat4x4(&g_motionProbe.previousWorld));
+        XMStoreFloat4x4(&g_motionProbe.previousWorld, world);
+    }
     if (hasPointLight) g_sceneObjectRenderer.DrawLightMarker(
         g_cmdList.Get(), g_srvHeap.Get(), g_rootSignature.Get(), g_pipelineGeoMarker.Get(),
         viewProj, g_camPos,
@@ -564,7 +618,7 @@ void DrawFrame(float dt)
         ? Camera::ViewProjection(g_otherCamPos, g_otherCamYaw, g_otherCamPitch,
             g_width, g_height, 0.1f, 5000.0f)
         : viewProj;
-    g_terrain.Draw(g_cmdList.Get(), viewProj, selectionVp, selectionEye, g_height,
+    g_terrain.Draw(g_cmdList.Get(), viewProj, selectionVp, selectionEye, temporalCamera, g_height,
         g_wireframeEnabled, g_terrainCulling, g_terrainLodColors);
     UpdateWindowTitle();
 
@@ -580,11 +634,11 @@ void DrawFrame(float dt)
     rtv.ptr += static_cast<SIZE_T>(g_frameIndex) * g_rtvDescriptorSize;
 
     g_renderSys.UploadFrameConstants(
-        g_camPos, viewProj, g_width, g_height,
+        g_camPos, rasterViewProj, g_width, g_height,
         cascadeMatrices, cascadeSplits, g_shadowsEnabled, g_shadowDebugView, g_cascadeColorDebug,
         g_vignetteEnabled, g_flyEyeEnabled, g_shadowMapDebugIndex);
     g_renderSys.DrawLightingPass(g_cmdList.Get(), g_srvHeap.Get(), g_width, g_height);
-    g_renderSys.DrawPostProcessPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height);
+    g_renderSys.DrawPostProcessPass(g_cmdList.Get(), g_srvHeap.Get(), rtv, g_width, g_height, g_showMotionVectors);
 
     D3D12_RESOURCE_BARRIER toPresent =
         D3DHelpers::Transition(backBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -681,6 +735,132 @@ bool RunTerrainSmoke()
     return errors == 0;
 }
 
+bool RunTemporalSmoke()
+{
+    const auto output = std::filesystem::path(AppPaths::ExecutableDirectory());
+    std::wofstream log(output / L"taa-check.txt");
+    auto& temporal = g_renderSys.Temporal();
+    auto settings = temporal.GetSettings();
+    const auto initialCamera = g_camPos;
+    std::vector<uint8_t> pixels, reference;
+    auto capture = [&](std::vector<uint8_t>& image) {
+        std::wstring error;
+        if (TerrainChecks::Capture(g_d3d, g_frameIndex, g_width, g_height, image, error))
+            return true;
+        log << L"FAIL: " << error << L"\n";
+        return false;
+    };
+    auto coloredVectors = [](const std::vector<uint8_t>& image) {
+        size_t count = 0;
+        for (size_t i = 0; i < image.size(); i += 4)
+            if (abs(int(image[i]) - 128) > 1 || abs(int(image[i + 1]) - 128) > 1)
+                ++count;
+        return count;
+    };
+    auto save = [&](const wchar_t* name) {
+        TerrainChecks::SavePpm(output / name, g_width, g_height, pixels);
+    };
+
+    ResizeSwapChain(640, 360);
+    DrawFrame(0);
+    if (!capture(pixels)) return false;
+    save(L"taa-off.ppm");
+
+    settings.enabled = true;
+    temporal.SetSettings(settings);
+    for (int frame = 0; frame < 8; ++frame) DrawFrame(0);
+    if (!capture(reference)) return false;
+    if (pixels == reference) { log << L"FAIL: TAA did not change the image\n"; return false; }
+    pixels.swap(reference);
+    save(L"taa-on.ppm");
+
+    g_showMotionVectors = true;
+    DrawFrame(0);
+    if (!capture(pixels)) return false;
+    if (coloredVectors(pixels) != 0) { log << L"FAIL: jitter leaks into motion\n"; return false; }
+    g_camPos.z += 0.15f;
+    DrawFrame(0);
+    if (!capture(pixels)) return false;
+    if (coloredVectors(pixels) == 0) { log << L"FAIL: no camera vectors\n"; return false; }
+    save(L"taa-camera-motion.ppm");
+
+    g_camPos = initialCamera;
+    g_motionProbe.Toggle();
+    temporal.Invalidate();
+    DrawFrame(0);
+    g_motionProbe.elapsed = 0.3f;
+    DrawFrame(0);
+    if (!capture(pixels)) return false;
+    const size_t probePixels = coloredVectors(pixels);
+    if (probePixels == 0 || probePixels >= pixels.size() / 4) {
+        log << L"FAIL: object motion is absent or fills the screen\n"; return false;
+    }
+    save(L"taa-object-motion.ppm");
+    log << L"PASS: static vectors are zero despite jitter; camera and object produce motion.\n";
+    g_showMotionVectors = false;
+
+    // Hold the scene clock fixed to isolate history on newly exposed pixels.
+    // Eight samples return to the first Halton offset for the comparison frame.
+    auto showHistory = [&](bool reproject, bool clampHistory) {
+        settings.reproject = reproject;
+        settings.clampHistory = clampHistory;
+        temporal.SetSettings(settings);
+        temporal.Invalidate();
+        g_motionProbe.elapsed = 0;
+        for (int frame = 0; frame < 8; ++frame) DrawFrame(0);
+        g_motionProbe.elapsed = 0.55f;
+        DrawFrame(0);
+        return capture(pixels);
+    };
+    auto errorAgainstReference = [&]() {
+        uint64_t error = 0;
+        for (size_t i = 0; i < pixels.size(); ++i)
+            error += abs(int(pixels[i]) - int(reference[i]));
+        return error;
+    };
+    g_motionProbe.elapsed = 0.55f;
+    temporal.Invalidate();
+    DrawFrame(0);
+    if (!capture(reference)) return false;
+    if (!showHistory(false, false)) return false;
+    const auto noReprojection = errorAgainstReference();
+    save(L"taa-same-uv.ppm");
+    if (!showHistory(true, false)) return false;
+    const auto noClamp = errorAgainstReference();
+    save(L"taa-reproject.ppm");
+    if (!showHistory(true, true)) return false;
+    const auto protectedHistory = errorAgainstReference();
+    save(L"taa-clamp.ppm");
+    log << L"Distance from current frame (lower is better in this motion case): "
+        << noReprojection << L" / " << noClamp << L" / " << protectedHistory << L"\n";
+    if (noClamp >= noReprojection || protectedHistory >= noClamp) {
+        log << L"FAIL: reprojection or clamping did not improve this motion case\n"; return false;
+    }
+
+    if (!g_terrain.Ready()) { log << L"FAIL: terrain unavailable for camera switch\n"; return false; }
+    g_motionProbe.Toggle();
+    SwitchScene();
+    DrawFrame(0);
+    if (!capture(pixels)) return false;
+    temporal.Invalidate();
+    DrawFrame(0);
+    if (!capture(reference)) return false;
+    if (pixels != reference) { log << L"FAIL: camera cut reused history\n"; return false; }
+
+    DrawFrame(0);
+    ResizeSwapChain(512, 320);
+    DrawFrame(0);
+    if (!capture(pixels)) return false;
+    temporal.Invalidate();
+    DrawFrame(0);
+    if (!capture(reference)) return false;
+    if (pixels != reference) { log << L"FAIL: resize reused history\n"; return false; }
+
+    const UINT errors = TerrainChecks::GpuErrors(g_device.Get());
+    log << L"PASS: accumulation, reprojection, clamping, camera cut and resize. GPU errors: " << errors << L"\n";
+    return errors == 0;
+}
+
 void InitD3D(HWND hwnd)
 {
     UINT dxgiFactoryFlags = 0;
@@ -764,7 +944,8 @@ void InitD3D(HWND hwnd)
         kDeferredSrvBase,
         g_srvDescriptorSize,
         AppPaths::LightingShaderFile().c_str(),
-        AppPaths::PostProcessShaderFile().c_str());
+        AppPaths::PostProcessShaderFile().c_str(),
+        (AppPaths::ExecutableDirectory() + L"TemporalResolve.hlsl").c_str());
     g_shadowMap.Init(g_device.Get(), g_srvHeap.Get(), kShadowSrvBase, g_srvDescriptorSize);
     g_pointShadowMap.Init(g_device.Get(), g_srvHeap.Get(), kDeferredSrvBase + 10, g_srvDescriptorSize);
     if (!LoadScene())
@@ -800,6 +981,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (!g_terrain.Ready())
                 MessageBoxW(hwnd, g_terrainError.c_str(), L"Terrain loading error", MB_OK | MB_ICONERROR);
             else SwitchScene();
+            UpdateWindowTitle();
+        }
+        else if (wp >= VK_F3 && wp <= VK_F7 && (lp & (1ll << 30)) == 0)
+        {
+            auto& temporal = g_renderSys.Temporal();
+            auto settings = temporal.GetSettings();
+            switch (wp)
+            {
+            case VK_F3: settings.enabled = !settings.enabled; break;
+            case VK_F4: g_showMotionVectors = !g_showMotionVectors; break;
+            case VK_F5: settings.reproject = !settings.reproject; break;
+            case VK_F6: settings.clampHistory = !settings.clampHistory; break;
+            case VK_F7: g_motionProbe.Toggle(); temporal.Invalidate(); break;
+            }
+            temporal.SetSettings(settings);
             UpdateWindowTitle();
         }
         else if (wp == 'C' && (lp & (1ll << 30)) == 0)
@@ -922,8 +1118,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
         }
         SwitchScene();
     }
-    if (smoke) {
-        const bool passed = RunTerrainSmoke();
+    const bool temporalSmoke = wcsstr(commandLine, L"--taa-smoke") != nullptr;
+    if (smoke || temporalSmoke) {
+        const bool passed = temporalSmoke ? RunTemporalSmoke() : RunTerrainSmoke();
         ShutdownD3D(); DestroyWindow(g_hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance);
         if (SUCCEEDED(coHr)) CoUninitialize();
         return passed ? 0 : 1;

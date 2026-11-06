@@ -69,7 +69,7 @@ struct PostProcessCBGPU
     UINT vignetteEnabled = 0;
     UINT flyEyeEnabled = 0;
     UINT toneMappingEnabled = 1;
-    UINT pad = 0;
+    UINT showMotionVectors = 0;
 };
 
 static_assert(sizeof(PostProcessCBGPU) == 32);
@@ -220,21 +220,20 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
 
 void RenderingSystem::CreatePostProcessPipeline(ID3D12Device* device, const wchar_t* hlslPath)
 {
-    D3D12_DESCRIPTOR_RANGE range{};
-    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 1;
-    range.BaseShaderRegister = 0;
-    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_ROOT_PARAMETER params[2]{};
+    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    D3D12_ROOT_PARAMETER params[3]{};
+    for (UINT i = 0; i < _countof(ranges); ++i)
+    {
+        ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ranges[i].NumDescriptors = 1;
+        ranges[i].BaseShaderRegister = i;
+        params[i + 1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[i + 1].DescriptorTable = {1, &ranges[i]};
+        params[i + 1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[1].DescriptorTable.NumDescriptorRanges = 1;
-    params[1].DescriptorTable.pDescriptorRanges = &range;
-    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -327,13 +326,15 @@ void RenderingSystem::Init(
     UINT gbufferSrvStartIndex,
     UINT srvDescriptorIncrement,
     const wchar_t* deferredHlslPath,
-    const wchar_t* postProcessHlslPath)
+    const wchar_t* postProcessHlslPath,
+    const wchar_t* temporalHlslPath)
 {
     m_device = device;
     m_gbufferSrvBase = gbufferSrvStartIndex;
     m_iblSrvBase = gbufferSrvStartIndex + 7;
     m_cascadeTextureSrvBase = gbufferSrvStartIndex + 11;
     m_postProcessSrvIndex = gbufferSrvStartIndex + 15;
+    m_motionSrvIndex = m_postProcessSrvIndex + 1;
     m_srvDescriptorIncrement = srvDescriptorIncrement;
 
     m_gbuffer.Init(device, width, height);
@@ -361,7 +362,18 @@ void RenderingSystem::Init(
     hr = m_postProcessCB->Map(0, &rr, reinterpret_cast<void**>(&m_postProcessCBMapped));
     if (FAILED(hr)) std::exit(static_cast<int>(hr));
 
+    m_temporal.Init(device, m_motionSrvIndex + 1, srvDescriptorIncrement,
+        D3D12Context::FrameCount, temporalHlslPath);
+    ResizeTemporalTargets(device, shaderVisibleSrvHeap, width, height);
     WriteDefaultLights();
+}
+
+void RenderingSystem::ResizeTemporalTargets(ID3D12Device* device, ID3D12DescriptorHeap* srvHeap, UINT width, UINT height)
+{
+    auto descriptor = srvHeap->GetCPUDescriptorHandleForHeapStart();
+    descriptor.ptr += SIZE_T(m_motionSrvIndex) * m_srvDescriptorIncrement;
+    m_gbuffer.CreateMotionSrv(device, descriptor);
+    m_temporal.Resize(device, srvHeap, width, height);
 }
 
 void RenderingSystem::Resize(
@@ -378,6 +390,8 @@ void RenderingSystem::Resize(
     if (width != m_lightingWidth || height != m_lightingHeight)
         CreateLightingTarget(device, width, height);
     CreateLightingTargetSrv(device, shaderVisibleSrvHeap);
+    ResizeTemporalTargets(device, shaderVisibleSrvHeap, width, height);
+    m_temporal.Invalidate();
 }
 
 void RenderingSystem::UploadFrameConstants(
@@ -561,8 +575,12 @@ void RenderingSystem::DrawPostProcessPass(
     ID3D12DescriptorHeap* srvHeapShaderVisible,
     D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
     UINT screenW,
-    UINT screenH)
+    UINT screenH,
+    bool showMotionVectors)
 {
+    const UINT colorSrv = m_temporal.Resolve(cmd, srvHeapShaderVisible, m_postProcessSrvIndex, m_motionSrvIndex);
+    auto* constants = reinterpret_cast<PostProcessCBGPU*>(m_postProcessCBMapped + m_frameIndex * kPostProcessCbStride);
+    constants->showMotionVectors = showMotionVectors;
     ID3D12DescriptorHeap* heaps[] = {srvHeapShaderVisible};
     cmd->SetDescriptorHeaps(1, heaps);
     cmd->SetGraphicsRootSignature(m_rootSigPostProcess.Get());
@@ -570,8 +588,11 @@ void RenderingSystem::DrawPostProcessPass(
     cmd->SetGraphicsRootConstantBufferView(0, m_postProcessCB->GetGPUVirtualAddress() + m_frameIndex * kPostProcessCbStride);
 
     D3D12_GPU_DESCRIPTOR_HANDLE table = srvHeapShaderVisible->GetGPUDescriptorHandleForHeapStart();
-    table.ptr += static_cast<SIZE_T>(m_postProcessSrvIndex) * m_srvDescriptorIncrement;
+    table.ptr += SIZE_T(colorSrv) * m_srvDescriptorIncrement;
     cmd->SetGraphicsRootDescriptorTable(1, table);
+    auto motion = srvHeapShaderVisible->GetGPUDescriptorHandleForHeapStart();
+    motion.ptr += SIZE_T(m_motionSrvIndex) * m_srvDescriptorIncrement;
+    cmd->SetGraphicsRootDescriptorTable(2, motion);
     cmd->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
 
     D3D12_VIEWPORT viewport{};

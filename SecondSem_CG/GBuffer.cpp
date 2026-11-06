@@ -27,6 +27,7 @@ void GBuffer::DestroySizeDependent()
     m_normal.Reset();
     m_depthBuffer.Reset();
     m_depth.Reset();
+    m_motion.Reset();
 }
 
 void GBuffer::CreateTargets(ID3D12Device* device, UINT width, UINT height)
@@ -64,6 +65,7 @@ void GBuffer::CreateTargets(ID3D12Device* device, UINT width, UINT height)
     makeColor(DXGI_FORMAT_R8G8B8A8_UNORM, m_albedo);
     makeColor(DXGI_FORMAT_R16G16B16A16_FLOAT, m_normal);
     makeColor(DXGI_FORMAT_R32_FLOAT, m_depthBuffer);
+    makeColor(MotionFormat, m_motion);
 
     D3D12_RESOURCE_DESC ds{};
     ds.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -98,6 +100,8 @@ void GBuffer::CreateTargets(ID3D12Device* device, UINT width, UINT height)
     rp.Format = DXGI_FORMAT_R32_FLOAT;
     rp.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
     device->CreateRenderTargetView(m_depthBuffer.Get(), &rp, rBase);
+    rBase.ptr += m_rtvInc;
+    device->CreateRenderTargetView(m_motion.Get(), nullptr, rBase);
 
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
     dsv.Format = DXGI_FORMAT_D32_FLOAT;
@@ -111,7 +115,7 @@ void GBuffer::Init(ID3D12Device* device, UINT width, UINT height)
 
     D3D12_DESCRIPTOR_HEAP_DESC rhd{};
     rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rhd.NumDescriptors = kRtvCount;
+    rhd.NumDescriptors = TargetCount;
     GFThrow(device->CreateDescriptorHeap(&rhd, IID_PPV_ARGS(&m_rtvHeap)));
 
     D3D12_DESCRIPTOR_HEAP_DESC dhd{};
@@ -143,38 +147,50 @@ static D3D12_RESOURCE_BARRIER Transition(
 
 void GBuffer::TransitionToRenderTargets(ID3D12GraphicsCommandList* cmd)
 {
-    D3D12_RESOURCE_BARRIER bars[3] = {
+    D3D12_RESOURCE_BARRIER bars[TargetCount] = {
         Transition(m_albedo.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
         Transition(m_normal.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
         Transition(m_depthBuffer.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        Transition(m_motion.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
     };
-    cmd->ResourceBarrier(3, bars);
+    cmd->ResourceBarrier(TargetCount, bars);
 }
 
 void GBuffer::TransitionToShaderResource(ID3D12GraphicsCommandList* cmd)
 {
-    D3D12_RESOURCE_BARRIER bars[3] = {
+    D3D12_RESOURCE_BARRIER bars[TargetCount] = {
         Transition(m_albedo.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
         Transition(m_normal.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
         Transition(m_depthBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        Transition(m_motion.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
     };
-    cmd->ResourceBarrier(3, bars);
+    cmd->ResourceBarrier(TargetCount, bars);
 }
 
 void GBuffer::ClearAndSetAsRenderTarget(ID3D12GraphicsCommandList* cmd, const float clearRgb[4])
 {
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[kRtvCount];
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[TargetCount];
     D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    for (int i = 0; i < kRtvCount; ++i)
+    for (UINT i = 0; i < TargetCount; ++i)
     {
         rtvs[i] = h;
         h.ptr += static_cast<SIZE_T>(m_rtvInc);
-        const float cc[4] = {clearRgb[0], clearRgb[1], clearRgb[2], 1.0f};
+        const float cc[4] = {i == 0 ? clearRgb[0] : 0.0f, i == 0 ? clearRgb[1] : 0.0f, i == 0 ? clearRgb[2] : 0.0f, 1.0f};
         cmd->ClearRenderTargetView(rtvs[i], cc, 0, nullptr);
     }
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
     cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-    cmd->OMSetRenderTargets(kRtvCount, rtvs, FALSE, &dsv);
+    cmd->OMSetRenderTargets(TargetCount, rtvs, FALSE, &dsv);
+}
+
+void GBuffer::CreateMotionSrv(ID3D12Device* device, D3D12_CPU_DESCRIPTOR_HANDLE descriptor) const
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = MotionFormat;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(m_motion.Get(), &srv, descriptor);
 }
 
 void GBuffer::CreateShaderResourceViews(

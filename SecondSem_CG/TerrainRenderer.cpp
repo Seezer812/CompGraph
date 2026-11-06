@@ -1,7 +1,8 @@
-﻿#ifndef NOMINMAX
+#ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include "TerrainRenderer.h"
+#include "GBuffer.h"
 #include "TextureUtil.h"
 #include "D3DHelpers.h"
 #include <d3dcompiler.h>
@@ -105,13 +106,16 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
     D3D12_DESCRIPTOR_RANGE textureRange{};
     textureRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     textureRange.NumDescriptors = 2;
-    D3D12_ROOT_PARAMETER parameters[2]{};
+    D3D12_ROOT_PARAMETER parameters[3]{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[0].Constants.Num32BitValues = 24;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[1].DescriptorTable = {1, &textureRange};
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    parameters[2].Descriptor.ShaderRegister = 2;
+    parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -119,7 +123,7 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
     sampler.MaxLOD = D3D12_FLOAT32_MAX;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_ROOT_SIGNATURE_DESC root{};
-    root.NumParameters = 2; root.pParameters = parameters;
+    root.NumParameters = _countof(parameters); root.pParameters = parameters;
     root.NumStaticSamplers = 1; root.pStaticSamplers = &sampler;
     root.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> blob, diagnostics;
@@ -153,10 +157,11 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
     p.DepthStencilState.DepthEnable = TRUE; p.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
     p.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     p.SampleMask = UINT_MAX; p.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    p.NumRenderTargets = 3;
+    p.NumRenderTargets = GBuffer::TargetCount;
     p.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     p.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     p.RTVFormats[2] = DXGI_FORMAT_R32_FLOAT;
+    p.RTVFormats[3] = GBuffer::MotionFormat;
     for (UINT i = 1; i < 3; ++i)
         p.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     p.DSVFormat = DXGI_FORMAT_D32_FLOAT; p.SampleDesc.Count = 1;
@@ -170,13 +175,14 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
 
 void TerrainRenderer::Draw(ID3D12GraphicsCommandList* cmd, const XMMATRIX& vp,
     const XMMATRIX& selectionVp, const XMFLOAT3& selectionEye,
-    UINT height, bool wireframe, bool culling, bool lodColors)
+    D3D12_GPU_VIRTUAL_ADDRESS temporalCamera, UINT height, bool wireframe, bool culling, bool lodColors)
 {
     if (!m_ready) return;
     m_data.Select(selectionVp, selectionEye, height, culling);
     ID3D12DescriptorHeap* heaps[] = {m_heap.Get()};
     cmd->SetDescriptorHeaps(1, heaps);
     cmd->SetGraphicsRootSignature(m_root.Get());
+    cmd->SetGraphicsRootConstantBufferView(2, temporalCamera);
     cmd->SetGraphicsRootDescriptorTable(1, m_heap->GetGPUDescriptorHandleForHeapStart());
     cmd->SetPipelineState(wireframe ? m_wire.Get() : m_solid.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

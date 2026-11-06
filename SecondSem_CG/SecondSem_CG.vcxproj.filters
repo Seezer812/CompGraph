@@ -21,6 +21,9 @@
     <ClCompile Include="GBuffer.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="TemporalAA.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
     <ClCompile Include="RenderingSystem.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
@@ -72,6 +75,9 @@
       <Filter>Исходные файлы</Filter>
     </ClInclude>
     <ClInclude Include="Camera.h">
+      <Filter>Исходные файлы</Filter>
+    </ClInclude>
+    <ClInclude Include="TemporalAA.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
     <ClInclude Include="RenderingSystem.h">
@@ -131,6 +137,12 @@
       <Filter>Файлы ресурсов</Filter>
     </None>
     <None Include="LightingPass.hlsl">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
+    <None Include="TemporalMotion.hlsli">
+      <Filter>Файлы ресурсов</Filter>
+    </None>
+    <None Include="TemporalResolve.hlsl">
       <Filter>Файлы ресурсов</Filter>
     </None>
     <None Include="PostProcess.hlsl">
