@@ -1,4 +1,3 @@
-// Lighting pass: reads G-buffer and reconstructs world position from depth.
 
 Texture2D GAlbedo : register(t0);
 Texture2D GNormal : register(t1);
@@ -46,7 +45,7 @@ cbuffer LightingCB : register(b0)
     float4 CameraPos_pad;
     float4 InvScreen_pad;
     row_major float4x4 InverseViewProjection;
-    float4 ShadowSettings; // x: environment max LOD, w: shadows enabled
+    float4 ShadowSettings;
     float4 CascadeSplits;
     row_major float4x4 CascadeMatrices[4];
     uint LightCount;
@@ -92,7 +91,6 @@ float ShadowPcf(uint cascade, float3 position, float3 normal, float3 lightDirect
     float3 uvz = lightClip.xyz / max(lightClip.w, 1e-5f);
     float2 uv = uvz.xy * float2(0.5f, -0.5f) + 0.5f;
     if (uvz.z <= 0.0f || uvz.z >= 1.0f || any(uv < 0.0f) || any(uv > 1.0f)) return 1.0f;
-    // Increased receiver bias reduces self-shadowing (shadow acne) on surfaces.
     float bias = max(0.0030f * (1.0f - saturate(dot(normal, lightDirection))), 0.0007f);
     float2 texel = 1.0f / 2048.0f;
     float visibility = 0.0f;
@@ -134,8 +132,6 @@ FsOut LightingFullscreenVS(uint vertexId : SV_VertexID)
     FsOut output;
     float2 uv = float2((vertexId << 1) & 2, vertexId & 2);
     output.pos = float4(uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
-    // G-buffer sampling uses top-left texture coordinates; restore its vertical
-    // UV flip and use the matching NDC convention in ReconstructWorldPosition.
     output.uv = float2(uv.x, 1.0f - uv.y);
     return output;
 }
@@ -211,14 +207,10 @@ float4 LightingPS(FsOut input) : SV_Target0
     if (ShadowMapDebugIndex != 0)
     {
         const float depth = SampleShadowMapDepth(ShadowMapDebugIndex, input.uv);
-        // Reversed contrast makes nearby shadow casters immediately visible.
         const float visibleDepth = pow(saturate(1.0f - depth), 0.32f);
         return float4(visibleDepth.xxx, 1.0f);
     }
 
-    // Read matching G-buffer texels directly. Bilinear filtering blends
-    // foreground depth with the background at silhouettes and destabilizes
-    // reconstructed positions and cascade selection while the camera moves.
     const int2 pixel = int2(input.pos.xy);
     float4 packedAlbedo = GAlbedo.Load(int3(pixel, 0));
     float3 albedo = packedAlbedo.rgb;
@@ -234,9 +226,6 @@ float4 LightingPS(FsOut input) : SV_Target0
     float3 position = ReconstructWorldPosition(input.uv, depth);
     normal = normalize(normal);
 
-    // Cascades are selected by radial camera distance. In visualization mode
-    // each cascade supplies the material for horizontal floor surfaces only;
-    // the rest of Sponza keeps its original materials.
     float cameraDistance = length(position - CameraPos_pad.xyz);
     uint cascade = cameraDistance < CascadeSplits.x ? 0 : cameraDistance < CascadeSplits.y ? 1 : cameraDistance < CascadeSplits.z ? 2 : 3;
     if (CascadeColorDebug != 0 && abs(normal.y) > 0.82f)
@@ -263,8 +252,6 @@ float4 LightingPS(FsOut input) : SV_Target0
     float3 sunDirection = normalize(-Sun.direction_cosOuter.xyz);
     float rawShadow = ShadowSettings.w > 0.5f ? ShadowPcf(cascade, position, normal, sunDirection) : 1.0f;
     if (InvScreen_pad.z > 0.5f) return float4(rawShadow.xxx, 1.0f);
-    // The shadow visibility is the actual directional-light multiplier.
-    // Keeping a forced 25% contribution made fully occluded regions appear lit.
     float sunShadow = rawShadow;
     color += EvaluateLight(Sun, albedo, metallic, roughness, normal, position, viewDirection) * sunShadow;
 
@@ -281,7 +268,6 @@ float4 LightingPS(FsOut input) : SV_Target0
         light.type = LIGHT_POINT;
         light.position_range = localLight.positionRadius;
         light.color_intensity = localLight.colorIntensity;
-        // Only point light zero owns a shadow cubemap.
         float visibility = 1.0f;
         if (lightIndex == 0 && ShadowSettings.w > 0.5f)
             visibility = PointShadowVisibility(position, normal, localLight);

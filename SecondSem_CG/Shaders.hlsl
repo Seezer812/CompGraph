@@ -2,8 +2,8 @@ cbuffer FrameCB : register(b0)
 {
     row_major float4x4 World;
     row_major float4x4 ViewProj;
-    float4 TimeCamPos;     // x — время (сек), yzw — позиция камеры в мире
-    float4 UvAnimAndPad;   // xy — скорость прокрутки UV (единиц текстуры / сек)
+    float4 TimeCamPos;
+    float4 UvAnimAndPad;
     float _PadRest[24];
 };
 

@@ -94,7 +94,6 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
     if (SUCCEEDED(hr)) WaitForSingleObject(complete, INFINITE);
     CloseHandle(complete);
     if (!check(hr, L"Terrain texture upload failed")) return false;
-    // Upload resources survive until the dedicated upload fence completes.
     uploads.clear();
 
     const auto& vertices = m_data.Vertices(); const auto& indices = m_data.Indices();
@@ -152,7 +151,7 @@ bool TerrainRenderer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue
     p.VS = {vs->GetBufferPointer(), vs->GetBufferSize()}; p.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
     p.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     p.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    p.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // skirts are visible from both sides
+    p.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     p.RasterizerState.DepthClipEnable = TRUE;
     p.DepthStencilState.DepthEnable = TRUE; p.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
     p.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;

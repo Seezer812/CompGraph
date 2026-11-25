@@ -10,7 +10,6 @@
 namespace Tex
 {
 
-// Каталог текстур: <mtlDir>/textures/. В MTL может быть другое расширение — ищем тот же stem с .tga.
 std::filesystem::path ResolveTexturePathInTexturesFolder(
     const std::filesystem::path& mtlDir,
     const std::wstring& mapRelFromMtl);
@@ -36,8 +35,6 @@ bool CreateTexture2DFromFile(
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& uploadKeep,
     std::wstring& error);
 
-// Minimal DDS/DX10 loader for the supplied IBL assets.  It preserves compressed
-// BC6H data and all cubemap mip levels instead of converting HDR data through WIC.
 bool CreateTextureFromDds(
     ID3D12Device* device,
     ID3D12GraphicsCommandList* cmdList,
@@ -50,7 +47,6 @@ bool CreateTextureFromDds(
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>& uploadKeep,
     std::wstring& error);
 
-// Colour maps use sRGB views; numeric maps use linear UNORM views.
 void WriteTexture2DSrv(
     ID3D12Device* device,
     ID3D12Resource* texture,
@@ -59,4 +55,4 @@ void WriteTexture2DSrv(
     UINT descriptorIncrement,
     bool srgb = false);
 
-} // namespace Tex
+}

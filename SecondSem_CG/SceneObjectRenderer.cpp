@@ -13,7 +13,7 @@ using namespace DirectX;
 namespace
 {
 constexpr UINT kCbAlignment = 256;
-constexpr UINT kMarkerSlotsPerFrame = 13; // shadows 0..9, marker 10..11, motion probe 12
+constexpr UINT kMarkerSlotsPerFrame = 13;
 constexpr UINT kSphereSlices = 12;
 constexpr UINT kSphereStacks = 8;
 
@@ -85,7 +85,7 @@ HRESULT CreateUploadBuffer(ID3D12Device* device, const void* source, UINT64 size
     out->Unmap(0, nullptr);
     return S_OK;
 }
-} // namespace
+}
 
 HRESULT SceneObjectRenderer::Initialize(ID3D12Device* device)
 {
@@ -220,7 +220,7 @@ const std::array<XMMATRIX, 3>& ShadowCasterWorlds()
     };
     return worlds;
 }
-} // namespace
+}
 
 void SceneObjectRenderer::DrawShadowCaster(ID3D12GraphicsCommandList* commandList, ID3D12DescriptorHeap* srvHeap,
     ID3D12RootSignature* rootSignature, ID3D12PipelineState* pipelineState, const XMMATRIX& viewProjection, float timeSeconds)

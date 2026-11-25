@@ -1,4 +1,3 @@
-// Geometry pass: fills albedo, normal and depth G-buffer targets.
 
 #include "TemporalMotion.hlsli"
 
@@ -67,7 +66,6 @@ TessFactors TessellationFactors(InputPatch<GeoVsOut, 3> patch)
         factors.edges[0] = factors.edges[1] = factors.edges[2] = factors.inside = 1.0f;
         return factors;
     }
-    // Shared edges must receive the same factor from both adjacent triangles.
     factors.edges[0] = EdgeTessellation(patch[1].posW, patch[2].posW);
     factors.edges[1] = EdgeTessellation(patch[2].posW, patch[0].posW);
     factors.edges[2] = EdgeTessellation(patch[0].posW, patch[1].posW);
@@ -93,13 +91,10 @@ GeoVsOut TessellationDS(TessFactors factors, const OutputPatch<GeoVsOut, 3> patc
         output.posW += output.nrmW * ((DisplacementMap.SampleLevel(Samp, output.uv, 0).r - 0.5f) * 0.10f);
     output.currentClip = mul(float4(output.posW, 1.0f), ViewProj);
     output.clipPos = ApplyTemporalJitter(output.currentClip);
-    // These domain paths currently render static transforms; their final
-    // displaced position is used for camera motion.
     output.previousClip = mul(float4(output.posW, 1.0f), PreviousViewProjection);
     return output;
 }
 
-// Separate quad-domain path for the animated procedural wall.
 struct QuadTessFactors { float edges[4] : SV_TessFactor; float inside[2] : SV_InsideTessFactor; };
 
 QuadTessFactors WaveWallFactors(InputPatch<GeoVsOut, 4> patch)
@@ -124,15 +119,12 @@ GeoVsOut WaveWallDS(QuadTessFactors factors, const OutputPatch<GeoVsOut, 4> patc
     output.posW = lerp(lerp(patch[0].posW, patch[1].posW, domainUv.x), lerp(patch[2].posW, patch[3].posW, domainUv.x), domainUv.y);
     output.uv = lerp(lerp(patch[0].uv, patch[1].uv, domainUv.x), lerp(patch[2].uv, patch[3].uv, domainUv.x), domainUv.y);
 
-    // The sine wave travels over the wall and shifts it along the Z normal.
     const float phase = output.posW.x * 2.1f + output.posW.y * 1.35f + TimeCamPos.x * 2.4f;
     const float amplitude = 0.22f;
     output.posW.z += amplitude * sin(phase);
     output.nrmW = normalize(float3(-amplitude * 2.1f * cos(phase), -amplitude * 1.35f * cos(phase), 1.0f));
     output.currentClip = mul(float4(output.posW, 1.0f), ViewProj);
     output.clipPos = ApplyTemporalJitter(output.currentClip);
-    // These domain paths currently render static transforms; their final
-    // displaced position is used for camera motion.
     output.previousClip = mul(float4(output.posW, 1.0f), PreviousViewProjection);
     return output;
 }
@@ -147,19 +139,14 @@ GeoRtOut GeometryPS(GeoVsOut input)
     if (UseUvAnim)
         uv += UvAnimAndPad.xy * TimeCamPos.x;
 
-    // Albedo has an sRGB SRV: hardware decodes before bilinear filtering.
     const float3 baseColor = Albedo.Sample(Samp, uv).rgb * Kd.rgb;
     if (IsEmissive != 0)
     {
         output.albedo = float4(baseColor, 0.0f);
-        output.normal = 0.0f; // Lighting pass treats this as unlit colour.
+        output.normal = 0.0f;
         output.depth = input.clipPos.z;
         return output;
     }
-    // OBJ/MTL is a specular-gloss workflow.  Convert its shininess to the
-    // perceptually linear roughness needed by the metallic-roughness BRDF.
-    // Sponza has no reliable metalness map, so coloured, very strong specular
-    // materials are the only ones treated as metals.
     const float specularStrength = HasSpecularTex ? dot(SpecMap.Sample(Samp, uv).rgb * Ks, 1.0f / 3.0f) : dot(Ks, 1.0f / 3.0f);
     const float metallic = IsPbrMaterial ? SpecMap.Sample(Samp, uv).r : saturate((specularStrength - 0.55f) * 2.2f);
     const float roughness = IsPbrMaterial ? clamp(DisplacementMap.Sample(Samp, uv).r, 0.06f, 0.95f) :
@@ -179,15 +166,10 @@ GeoRtOut GeometryPS(GeoVsOut input)
         if (dot(mapped, mapped) > 1e-12f) normalW = normalize(mapped);
     }
     output.normal = float4(normalW, roughness);
-    // In a pixel shader SV_POSITION.z is already the post-projection depth
-    // in the [0, 1] range. SV_POSITION.w is reciprocal clip-space W here;
-    // dividing by it again corrupts the depth used to reconstruct world space.
     output.depth = input.clipPos.z;
     return output;
 }
 
-// Forward-шейдер второго viewport. Он выводит полноценную геометрию сцены
-// прямо в back buffer, не изменяя основной G-buffer.
 float4 TopCameraPS(GeoVsOut input) : SV_Target
 {
     float2 uv = input.uv * UvScale + UvOffset;

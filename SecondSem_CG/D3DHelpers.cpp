@@ -64,4 +64,4 @@ D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATE
     return barrier;
 }
 
-} // namespace D3DHelpers
+}

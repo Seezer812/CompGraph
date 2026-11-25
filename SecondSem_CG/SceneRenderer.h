@@ -1,8 +1,5 @@
 #pragma once
 
-// SceneRenderer отвечает только за содержимое сцены: OBJ/MTL, текстуры,
-// GPU-буферы материалов и отрисовку Sponza. Он не управляет окном,
-// swap-chain или циклом приложения.
 
 #include <d3d12.h>
 #include <DirectXMath.h>
@@ -15,7 +12,6 @@
 class SceneRenderer
 {
 public:
-    // Select only after the corresponding GPU frame has completed.
     void BeginFrame(UINT frameIndex) { m_frameIndex = frameIndex; m_nextFrameConstantSlot = 0; }
     bool Load(
         ID3D12Device* device,
@@ -37,8 +33,6 @@ public:
         float timeSeconds,
         bool tessellationEnabled) const;
 
-    // Depth-only draw used by every CSM cascade. It intentionally uses the base mesh:
-    // shadow silhouette remains stable even when optional tessellation is disabled.
     void DrawShadow(
         ID3D12GraphicsCommandList* commandList,
         ID3D12RootSignature* rootSignature,
@@ -54,7 +48,6 @@ public:
         UINT face,
         const DirectX::XMFLOAT4& lightPositionRange) const;
 
-    // World-space bounds of Sponza geometry used by the shadow pass.
     bool GetShadowCasterBounds(DirectX::XMFLOAT3& minimum, DirectX::XMFLOAT3& maximum) const;
 
     bool IsReady() const { return m_ready; }

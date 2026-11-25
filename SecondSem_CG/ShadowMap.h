@@ -4,7 +4,6 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 
-// Four depth maps for cascaded directional-light shadows.
 class ShadowMap
 {
 public:

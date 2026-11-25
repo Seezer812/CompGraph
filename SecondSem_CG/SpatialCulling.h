@@ -13,7 +13,6 @@ public:
 
     void Generate(uint32_t count, uint32_t seed = 20260918);
     const std::vector<Object>& Objects() const { return m_objects; }
-    // octree=false tests all objects directly; frustum=false returns all objects.
     std::vector<uint32_t> FindVisible(const DirectX::XMMATRIX& viewProjection, bool frustum, bool octree, Stats& stats) const;
 
 private:

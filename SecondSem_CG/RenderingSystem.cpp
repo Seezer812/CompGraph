@@ -50,7 +50,7 @@ struct LightingCBGPU
     XMFLOAT4 cameraPos_pad{};
     XMFLOAT4 invScreen_pad{};
     XMFLOAT4X4 inverseViewProjection{};
-    XMFLOAT4 shadowSettings{}; // x: environment max LOD, w: shadows enabled
+    XMFLOAT4 shadowSettings{};
     XMFLOAT4 cascadeSplits{};
     XMFLOAT4X4 cascadeMatrices[4]{};
     UINT lightCount = 0;
@@ -119,7 +119,7 @@ static ComPtr<ID3D12Resource> CreateUploadCb(ID3D12Device* device, UINT64 size)
     return buf;
 }
 
-} // namespace
+}
 
 void RenderingSystem::WriteDefaultLights()
 {
@@ -138,7 +138,7 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
 {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 15; // G-buffer, CSM, IBL, point shadow and four cascade debug textures.
+    range.NumDescriptors = 15;
     range.BaseShaderRegister = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -152,7 +152,6 @@ void RenderingSystem::CreateLightingPipeline(ID3D12Device* device, const wchar_t
     params[1].DescriptorTable.pDescriptorRanges = &range;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    // Root SRVs avoid rewriting descriptors that an in-flight frame uses.
     for (UINT i = 2; i < 5; ++i)
     {
         params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
@@ -454,8 +453,6 @@ void RenderingSystem::UploadLightTiles(const XMMATRIX& viewProjection, UINT widt
 {
     const auto grid = LightTiling::Build(m_pointLights, viewProjection, width, height);
     auto& frame = m_lightFrames[m_frameIndex];
-    // BeginFrame's fence wait protects these allocations and mapped writes.
-    // Allocate only as much as the current list needs; retain capacity thereafter.
     auto upload = [&](ComPtr<ID3D12Resource>& buffer, uint8_t*& mapped, UINT64& capacity,
         const void* source, UINT64 bytes)
     {

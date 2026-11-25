@@ -1,4 +1,3 @@
-// DirectX 12: окно, FPS-камера, сцена Sponza (OBJ/MTL).
 
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -153,8 +152,6 @@ void SwitchScene()
     g_camPrevRmb = false;
 }
 
-// Sponza содержит много треугольников, поэтому тесселяция включается вручную клавишей T.
-// Так первый кадр гарантированно появляется даже на встроенной видеокарте.
 bool g_tessellationEnabled = false;
 bool g_wireframeEnabled = false;
 bool g_shadowsEnabled = true;
@@ -339,7 +336,6 @@ void CreateGeometryPipeline()
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoWire)));
 
-    // Обычная геометрия сцены рисуется треугольниками без тесселяции.
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     pso.HS = {};
@@ -347,8 +343,6 @@ void CreateGeometryPipeline()
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoSimple)));
 
-    // Test objects are rendered from both sides, which avoids losing polygons
-    // because of a mesh winding convention.
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     ThrowIfFailed(g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_pipelineGeoMarker)));
 
@@ -415,8 +409,6 @@ void CreateShadowPipeline()
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}, };
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};
     p.pRootSignature = g_shadowRootSignature.Get(); p.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
-    // Only light-facing scene geometry must enter the shadow map. Rendering
-    // both sides in an enclosed Sponza hall makes reverse walls occlude the sun.
     p.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; p.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     p.RasterizerState.DepthBias = 1000; p.RasterizerState.SlopeScaledDepthBias = 1.5f; p.RasterizerState.DepthClipEnable = TRUE;
     p.DepthStencilState.DepthEnable = TRUE; p.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL; p.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
@@ -454,9 +446,6 @@ std::array<XMMATRIX, PointShadowMap::FaceCount> PointShadowMatrices(const XMFLOA
 
 std::array<float, ShadowMap::CascadeCount> CascadeSplits()
 {
-    // Camera visibility extends to 200 units, while CSM only needs to cover
-    // the 40-unit Sponza hall. Four equal 10-unit intervals make each level
-    // visible in the scene instead of placing all geometry in cascade zero.
     constexpr float shadowDistance = 40.0f;
     constexpr float step = shadowDistance / static_cast<float>(ShadowMap::CascadeCount);
     return {step, step * 2.0f, step * 3.0f, shadowDistance};
@@ -465,9 +454,6 @@ std::array<float, ShadowMap::CascadeCount> CascadeSplits()
 std::array<XMMATRIX, ShadowMap::CascadeCount> CascadeMatrices()
 {
     std::array<XMMATRIX, ShadowMap::CascadeCount> result{};
-    // Scene-anchored CSM: the light cameras remain fixed in world space.
-    // The main camera selects a resolution level, but cannot make the shadow
-    // projection slide over Sponza while the player moves.
     const XMVECTOR lightDir = XMVector3Normalize(XMVectorSet(0.18f, -0.96f, -0.22f, 0));
     const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
     const XMVECTOR lightUp = fabsf(XMVectorGetY(lightDir)) > 0.95f
@@ -491,8 +477,6 @@ std::array<XMMATRIX, ShadowMap::CascadeCount> CascadeMatrices()
                     z ? boundsMax.z : boundsMin.z, 1.0f);
                 sceneRadius = (std::max)(sceneRadius, XMVectorGetX(XMVector3Length(corner - centre)));
             }
-    // Every level contains the complete hall. Different radii still give the
-    // near cascade the highest texel density without camera-dependent motion.
     const float baseRadius = ceilf(sceneRadius + 2.0f);
     for (UINT cascade = 0; cascade < ShadowMap::CascadeCount; ++cascade)
     {
@@ -509,7 +493,6 @@ void DrawFrame(float dt)
 {
     g_frameIndex = g_swapChain->GetCurrentBackBufferIndex();
 
-    // All mutable upload data has a separate slice for each frame index.
     const UINT64 fenceToWait = g_frameFenceValues[g_frameIndex];
     if (g_fence->GetCompletedValue() < fenceToWait)
     {
@@ -612,7 +595,6 @@ void DrawFrame(float dt)
         XMFLOAT3(pointLightPositionRange.x, pointLightPositionRange.y, pointLightPositionRange.z),
         XMFLOAT3(g_renderSys.PointLights().front().colorIntensity.x,
             g_renderSys.PointLights().front().colorIntensity.y, g_renderSys.PointLights().front().colorIntensity.z), g_appTime);
-    // The overview observes the primary camera's selection, not its own frustum.
     const auto& selectionEye = g_terrainMode ? g_otherCamPos : g_camPos;
     const XMMATRIX selectionVp = g_terrainMode
         ? Camera::ViewProjection(g_otherCamPos, g_otherCamYaw, g_otherCamPitch,
@@ -665,7 +647,7 @@ bool RunTerrainSmoke()
         if (TerrainChecks::Capture(g_d3d, g_frameIndex, g_width, g_height, image, error)) return true;
         log << L"FAIL: " << error << L"\n"; return false;
     };
-    DrawFrame(0); DrawFrame(0); // let hysteresis settle at the initial view
+    DrawFrame(0); DrawFrame(0);
     if (!capture(preview) || g_terrain.Statistics().patches == 0) {
         log << L"FAIL: initial terrain view is empty\n"; return false;
     }
@@ -689,13 +671,9 @@ bool RunTerrainSmoke()
     }
     g_terrainCulling = true;
     log << L"PASS: observer movement preserves primary selection; C reveals removed terrain.\n";
-    // Next compare identical images from the primary view, where culling
-    // must only remove geometry outside the rendered frustum.
     g_terrainMode = false;
     const auto initialPosition = g_camPos;
     const float initialYaw = g_camYaw, initialPitch = g_camPitch;
-    // The overview can contain the whole map. Test culling from a closer
-    // view where some patches deliberately extend past the screen edges.
     g_camPos = {0, 420, -820}; g_camYaw = 0; g_camPitch = 0.40f;
     DrawFrame(0); DrawFrame(0);
     if (!capture(culled)) return false;
@@ -799,8 +777,6 @@ bool RunTemporalSmoke()
     log << L"PASS: static vectors are zero despite jitter; camera and object produce motion.\n";
     g_showMotionVectors = false;
 
-    // Hold the scene clock fixed to isolate history on newly exposed pixels.
-    // Eight samples return to the first Halton offset for the comparison frame.
     auto showHistory = [&](bool reproject, bool clampHistory) {
         settings.reproject = reproject;
         settings.clampHistory = clampHistory;
@@ -960,7 +936,6 @@ void InitD3D(HWND hwnd)
     g_terrain.Initialize(g_device.Get(), g_queue.Get(),
         std::filesystem::path(AppPaths::ExecutableDirectory()) / L"assets/terrain/canyon",
         std::filesystem::path(AppPaths::ExecutableDirectory()) / L"Terrain.hlsl", g_terrainError);
-    // Additional lights are supplied here without changing the shader.
     g_renderSys.SetPointLights({{ScenePointLight(), XMFLOAT4(1.0f, 0.62f, 0.22f, 6.0f)}});
 }
 
@@ -1066,7 +1041,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 }
 
-} // namespace
+}
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
 {
@@ -1129,7 +1104,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int)
     QueryPerformanceFrequency(&g_qpcFreq);
     QueryPerformanceCounter(&g_qpcLast);
 
-    // Окно показывается только после загрузки Sponza, шейдеров и ресурсов GPU.
     ShowWindow(g_hwnd, SW_SHOW);
     UpdateWindow(g_hwnd);
 

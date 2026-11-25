@@ -7,7 +7,6 @@
 #include <string>
 #include <vector>
 
-// Immutable geometry and CPU quadtree. The two source images remain whole.
 class TerrainData
 {
 public:
@@ -30,7 +29,7 @@ public:
     void Select(const DirectX::XMMATRIX& viewProjection, const DirectX::XMFLOAT3& eye,
         uint32_t screenHeight, bool culling);
     bool Validate(std::wstring& error);
-    float Height(float x, float z) const; // global coordinates 0..WorldSize
+    float Height(float x, float z) const;
     const std::vector<Vertex>& Vertices() const { return m_vertices; }
     const std::vector<uint32_t>& Indices() const { return m_indices; }
     const std::vector<Node>& Nodes() const { return m_nodes; }

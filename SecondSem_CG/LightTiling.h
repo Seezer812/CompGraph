@@ -13,7 +13,6 @@ namespace LightTiling
 constexpr uint32_t TileSize = 32;
 constexpr uint32_t MaxPointLights = 4096;
 
-// Linear RGB; radius is a hard influence limit, intensity controls brightness.
 struct PointLight
 {
     DirectX::XMFLOAT4 positionRadius{};
@@ -31,9 +30,6 @@ struct Grid
     std::vector<uint32_t> indices;
 };
 
-// Conservative screen bounds of each light's sphere. CPU binning is sufficient
-// for thousands of lights; the pixel shader visits only its tile's compact list.
-// No per-tile cap: overlapping lights are never silently dropped.
 inline Grid Build(std::span<const PointLight> lights,
     const DirectX::XMMATRIX& viewProjection, uint32_t width, uint32_t height)
 {
@@ -68,8 +64,6 @@ inline Grid Build(std::span<const PointLight> lights,
             const XMVECTOR corner = XMVector4Transform(
                 center + XMVectorSet(x * radius, y * radius, z * radius, 0.0f), viewProjection);
             const float w = XMVectorGetW(corner);
-            // Perspective projection is unbounded at the eye plane. Cover the
-            // screen conservatively when the bounding box crosses the near plane.
             if (w <= 1e-5f || XMVectorGetZ(corner) <= 0.0f)
             {
                 nearIntersection = true;
@@ -89,7 +83,6 @@ inline Grid Build(std::span<const PointLight> lights,
             return (std::min)(grid.rows - 1, static_cast<uint32_t>(
                 std::clamp(0.5f - ndc * 0.5f, 0.0f, 1.0f) * height) / TileSize);
         };
-        // Small padding protects tile boundaries from floating-point roundoff.
         const uint32_t firstX = tileX(minX - 1e-5f), lastX = tileX(maxX + 1e-5f);
         const uint32_t firstY = tileY(maxY + 1e-5f), lastY = tileY(minY - 1e-5f);
         for (uint32_t y = firstY; y <= lastY; ++y)
@@ -104,4 +97,4 @@ inline Grid Build(std::span<const PointLight> lights,
     }
     return grid;
 }
-} // namespace LightTiling
+}

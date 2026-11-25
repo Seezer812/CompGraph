@@ -450,7 +450,7 @@ static bool DecodeImageFileToRgba32(
     return true;
 }
 
-} // namespace
+}
 
 bool CreateTextureFromDds(
     ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
@@ -558,11 +558,8 @@ std::filesystem::path ResolveTexturePathInTexturesFolder(
         relAttempts.push_back(norm);
     };
 
-    // 1) путь как в MTL (относительно textures/)
     pushAttempt(inner);
-    // 2) та же подпапка, имя как stem + .tga (MTL мог указать .jpg/png)
     pushAttempt(inner.parent_path() / (stemInner + L".tga"));
-    // 3) только stem.tga в корне textures/
     pushAttempt(fs::path(stemInner + L".tga"));
     pushAttempt(fname);
     pushAttempt(fname.parent_path() / (stemFname + L".tga"));
@@ -690,4 +687,4 @@ bool CreateTexture2DFromFile(
     return true;
 }
 
-} // namespace Tex
+}

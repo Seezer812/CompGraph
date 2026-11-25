@@ -44,7 +44,6 @@ VertexOut TerrainVS(float2 positionXZ : POSITION, float2 uv : TEXCOORD0, float s
 {
     VertexOut result;
     float4 position = float4(positionXZ.x, TerrainHeight(uv) - skirtDrop, positionXZ.y, 1);
-    // Both projections use the same GPU-displaced terrain vertex.
     result.currentClip = mul(position, ViewProjection);
     result.position = ApplyTemporalJitter(result.currentClip);
     result.previousClip = mul(position, PreviousViewProjection);

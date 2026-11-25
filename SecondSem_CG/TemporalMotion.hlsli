@@ -1,4 +1,3 @@
-// Geometry paths share one camera contract. Jitter changes coverage only.
 cbuffer TemporalCamera : register(b2)
 {
     row_major float4x4 PreviousViewProjection;
@@ -13,7 +12,6 @@ float4 ApplyTemporalJitter(float4 clip)
 
 float2 TemporalMotionUV(float4 currentClip, float4 previousClip)
 {
-    // A point behind the previous camera has no usable history.
     if (previousClip.w <= 1e-5f)
         return float2(4, 4);
 

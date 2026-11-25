@@ -50,4 +50,4 @@ bool UsesAnimatedUv(const std::wstring& materialTexturePath)
         if (value.find(key) != std::wstring::npos) return true;
     return false;
 }
-} // namespace ScenePaths
+}

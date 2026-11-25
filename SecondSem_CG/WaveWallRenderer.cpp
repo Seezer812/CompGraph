@@ -20,13 +20,10 @@ struct alignas(256) MaterialConstants
 };
 static_assert(sizeof(FrameConstants) == kCbAlignment);
 static_assert(sizeof(MaterialConstants) == kCbAlignment);
-} // namespace
+}
 
 bool WaveWallRenderer::Initialize(ID3D12Device* device)
 {
-    // Every cell is a quad patch, in the order bottom-left, bottom-right, top-left, top-right.
-    // Sponza's large brick wall is at world Z = 2.5 after the scene transform.
-    // The 0.24 offset leaves enough clearance for the 0.22 wave amplitude.
     constexpr float left = -8.5f, right = -3.5f, bottom = -6.8f, top = -2.4f, z = 1.74f;
     constexpr UINT columns = 8, rows = 8;
     std::vector<Vertex> vertices;

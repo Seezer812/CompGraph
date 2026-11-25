@@ -68,7 +68,6 @@ static bool ParseFloat2(const std::string& rest, float out[2])
     return !iss.fail();
 }
 
-// Строка map_* в MTL: опции -s u v (тайлинг), -o u v (смещение UV), затем путь к файлу.
 static void ParseMapOptionsAndFilename(std::string rest, std::wstring& outPath, float scale[2], float offset[2])
 {
     scale[0] = scale[1] = 1.0f;
@@ -292,7 +291,7 @@ static void SplitFaceToken(std::string_view tok, int32_t& vi, int32_t& vti, int3
     next(vni);
 }
 
-} // namespace
+}
 
 bool LoadObj(const std::filesystem::path& objPath, LoadedMesh& out, std::wstring& error)
 {
@@ -362,7 +361,6 @@ bool LoadObj(const std::filesystem::path& objPath, LoadedMesh& out, std::wstring
         const size_t pi = ResolveIndex(vi, positions.size());
         const size_t ni = (vni != 0) ? ResolveIndex(vni, normals.size()) : 0;
         const size_t ti = (vti != 0) ? ResolveIndex(vti, uvs.size()) : 0;
-        // Negative OBJ indices are relative to the arrays at this face.
         VKey key{static_cast<int32_t>(pi + 1),
             vti != 0 ? static_cast<int32_t>(ti + 1) : 0,
             vni != 0 ? static_cast<int32_t>(ni + 1) : 0};
@@ -435,7 +433,6 @@ bool LoadObj(const std::filesystem::path& objPath, LoadedMesh& out, std::wstring
         {
             float t[2]{};
             if (ParseFloat2(rest, t))
-                // OBJ/MTL обычно в пространстве OpenGL (V снизу); для DX11/12 нужен переворот по V.
                 uvs.push_back(XMFLOAT2{t[0], 1.0f - t[1]});
             continue;
         }
@@ -520,4 +517,4 @@ bool LoadObj(const std::filesystem::path& objPath, LoadedMesh& out, std::wstring
     return !out.vertices.empty() && !out.indices.empty();
 }
 
-} // namespace Obj
+}

@@ -50,20 +50,15 @@ bool IsTessellatedMaterial(const std::string& name)
 
 bool IsBackgroundMaterial(const Obj::Material& material)
 {
-    // These three broad, non-architectural meshes in the source asset form its
-    // photographed exterior backdrop. They are not part of the Sponza building.
     return material.name == "Material__25" || material.name == "Material__298" ||
         material.name == "Material__47";
 }
 
 bool IsShadowCasterMaterial(const Obj::Material& material)
 {
-    // A shadow map must contain the complete Sponza interior: every wall,
-    // floor, roof and decorative object can occlude a light. The photographic
-    // exterior backdrop is the only imported geometry intentionally excluded.
     return !IsBackgroundMaterial(material);
 }
-} // namespace
+}
 
 bool SceneRenderer::Load(
     ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12CommandAllocator* uploadAllocator,
@@ -83,19 +78,14 @@ bool SceneRenderer::Load(
     std::wstring error;
     if (!Obj::LoadObj(objPath, m_mesh, error) || m_mesh.vertices.empty() || m_mesh.indices.empty())
         return false;
-    // Slots 0..2 are fallback textures; never overwrite deferred-pass SRVs.
     if (materialSrvLimit < 3 || materialSrvLimit > srvHeap->GetDesc().NumDescriptors ||
         m_mesh.materials.size() > (materialSrvLimit - 3) / 4) return false;
 
-    // Remove the imported photographic backdrop before any GPU buffers are built.
-    // It cannot then reach either the colour or the shadow pass.
     std::erase_if(m_mesh.submeshes, [this](const Obj::Submesh& submesh) {
         return submesh.materialIndex < m_mesh.materials.size() &&
             IsBackgroundMaterial(m_mesh.materials[submesh.materialIndex]);
     });
 
-    // Cache a world-space AABB for the objects used by DrawShadow.  This lets
-    // each cascade include upstream casters in its light-space Z range.
     m_shadowCasterBoundsMin = XMFLOAT3(FLT_MAX, FLT_MAX, FLT_MAX);
     m_shadowCasterBoundsMax = XMFLOAT3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
     m_hasShadowCasterBounds = false;
@@ -177,7 +167,6 @@ bool SceneRenderer::Load(
         return false;
     ID3D12CommandList* lists[] = {uploadCommands};
     queue->ExecuteCommandLists(1, lists);
-    // До повторного использования upload allocator дожидаемся завершения загрузки.
     ComPtr<ID3D12Fence> uploadFence;
     if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&uploadFence)))) return false;
     HANDLE eventHandle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -197,13 +186,10 @@ bool SceneRenderer::Load(
         }
     }
     CloseHandle(eventHandle);
-    // Uploads have completed; staging resources need not occupy GPU-visible RAM.
     uploads.clear();
 
     const UINT materialCount = (std::max)(1u, static_cast<UINT>(m_mesh.materials.size()));
     m_materialConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, materialCount * kCbAlignment);
-    // Main camera and top camera are encoded in one command list.  Keep a
-    // separate constant slot for each draw and each in-flight GPU frame.
     m_frameConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, D3D12Context::FrameCount * 4 * kCbAlignment);
     m_shadowConstants = D3DHelpers::CreateUploadBuffer(device, nullptr, D3D12Context::FrameCount * 10 * kCbAlignment);
     D3D12_RANGE range{0, 0};
@@ -222,7 +208,6 @@ bool SceneRenderer::Load(
         std::memcpy(mapped + i * kCbAlignment, &constants, sizeof(constants));
     }
     m_materialConstants->Unmap(0, nullptr);
-    // Rendering uses GPU geometry plus submesh/material metadata from now on.
     m_mesh.vertices.clear(); m_mesh.vertices.shrink_to_fit();
     m_mesh.indices.clear(); m_mesh.indices.shrink_to_fit();
     m_ready = true; return true;

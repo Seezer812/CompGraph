@@ -28,4 +28,4 @@ void Update(
     bool& wasRightMouseDown
     );
 
-} // namespace Camera
+}

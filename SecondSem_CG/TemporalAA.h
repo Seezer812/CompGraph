@@ -6,7 +6,6 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 
-// Owns the temporal camera state and the history of the main HDR view.
 class TemporalAA
 {
 public:
@@ -25,12 +24,9 @@ public:
     void SetSettings(Settings settings);
     const Settings& GetSettings() const { return m_settings; }
 
-    // Call after acquiring the GPU frame's upload slot. The returned matrix
-    // matches the depth rasterized with CameraConstants(frameIndex).
     DirectX::XMMATRIX BeginFrame(UINT frameIndex, const DirectX::XMMATRIX& viewProjection);
     D3D12_GPU_VIRTUAL_ADDRESS CameraConstants(UINT frameIndex) const;
 
-    // Returns the color SRV index to feed to the next pass.
     UINT Resolve(ID3D12GraphicsCommandList* cmd, ID3D12DescriptorHeap* srvHeap,
         UINT currentColorSrv, UINT motionSrv);
 

@@ -7,8 +7,6 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
-// Все ресурсы, принадлежащие жизненному циклу Direct3D 12.
-// Рендереры сцены и освещения не владеют этими объектами.
 struct D3D12Context
 {
     static constexpr UINT FrameCount = 2;

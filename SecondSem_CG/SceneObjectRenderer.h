@@ -6,11 +6,9 @@
 
 #include "SpatialCulling.h"
 
-// Рисует тестовые объекты для проверки frustum/octree culling и CSM shadows.
 class SceneObjectRenderer
 {
 public:
-    // Select only after the corresponding GPU frame has completed.
     void BeginFrame(UINT frameIndex) { m_frameIndex = frameIndex; }
     HRESULT Initialize(ID3D12Device* device);
 
@@ -26,7 +24,6 @@ public:
         bool octreeCulling,
         SpatialCulling::Stats& cullingStats);
 
-    // Рисует с верхней камеры ровно те объекты, которые прошли culling основной камеры.
     void DrawCulledFromTopCamera(
         ID3D12GraphicsCommandList* commandList,
         ID3D12DescriptorHeap* srvHeap,
@@ -38,7 +35,6 @@ public:
         bool frustumCulling,
         bool octreeCulling);
 
-    // A fixed, clearly visible marker for demonstrating the directional shadow.
     void DrawShadowCaster(
         ID3D12GraphicsCommandList* commandList,
         ID3D12DescriptorHeap* srvHeap,
@@ -47,7 +43,6 @@ public:
         const DirectX::XMMATRIX& viewProjection,
         float timeSeconds);
 
-    // Unlit geometry for inspecting motion independently of lighting.
     void DrawMotionProbe(
         ID3D12GraphicsCommandList* commandList,
         ID3D12DescriptorHeap* srvHeap,

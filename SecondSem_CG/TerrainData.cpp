@@ -64,8 +64,6 @@ bool TerrainData::Load(const std::filesystem::path& heightMap, std::wstring& err
 
 float TerrainData::Height(float x, float z) const
 {
-    // Map both endpoints to the source's pixel centers. No padded image or
-    // independently normalized tile maps are created.
     const float sx = std::clamp(x / WorldSize, 0.0f, 1.0f) * (m_width - 1);
     const float sz = std::clamp(z / WorldSize, 0.0f, 1.0f) * (m_height - 1);
     const uint32_t x0 = uint32_t(sx), z0 = uint32_t(sz);
@@ -75,7 +73,6 @@ float TerrainData::Height(float x, float z) const
     const float c = float(m_samples[z1 * m_width + x0]), d = float(m_samples[z1 * m_width + x1]);
     const float raw = ((a + u * (b - a)) * (1 - v) + (c + u * (d - c)) * v) * (HeightScale / 65535.0f);
     if (!m_sponzaSite) return raw;
-    // Flat foundation under Sponza, smoothly joining the original relief.
     const float dx = x - WorldSize / 2, dz = z - WorldSize / 2;
     float t = std::clamp((std::sqrt(dx * dx + dz * dz) - 24.0f) / 24.0f, 0.0f, 1.0f);
     t = t * t * (3 - 2 * t);
@@ -102,8 +99,6 @@ int TerrainData::BuildNode(uint32_t x, uint32_t z, uint32_t span, uint32_t level
                 : d + (1 - u) * (c - d) + (1 - v) * (b - d);
             node.geometricError = std::max(node.geometricError, std::abs(h - approximation));
         }
-    // Include source samples between the integer world-grid points as well;
-    // otherwise a narrow peak could escape the culling box.
     const uint32_t sx0 = uint32_t(std::floor(float(x) / WorldSize * (m_width - 1)));
     const uint32_t sz0 = uint32_t(std::floor(float(z) / WorldSize * (m_height - 1)));
     const uint32_t sx1 = std::min(m_width - 1, uint32_t(std::ceil(float(x + span) / WorldSize * (m_width - 1))));
@@ -126,8 +121,6 @@ int TerrainData::BuildNode(uint32_t x, uint32_t z, uint32_t span, uint32_t level
             const uint32_t source = edge == 0 ? t : edge == 1 ? Grid * Side + t
                 : edge == 2 ? t * Side : t * Side + Grid;
             Vertex v = m_vertices[node.baseVertex + source];
-            // There is no adjacent LOD outside the map. Keep those skirts
-            // degenerate instead of drawing a tall wall around the world.
             const bool outer = (edge == 0 && z == 0) || (edge == 1 && z + span == uint32_t(WorldSize))
                 || (edge == 2 && x == 0) || (edge == 3 && x + span == uint32_t(WorldSize));
             if (!outer) v.skirtDrop = m_skirtDepth;
@@ -172,7 +165,6 @@ void TerrainData::Visit(int index, const XMMATRIX& vp, const XMFLOAT3& eye,
     if (culling && Outside(node, vp)) { ++m_stats.culled; return; }
     const XMFLOAT3 center{(node.minimum.x + node.maximum.x) / 2,
         (node.minimum.y + node.maximum.y) / 2, (node.minimum.z + node.maximum.z) / 2};
-    // Nearest box depth along the view axis, rather than Euclidean distance.
     const float depth = (center.x - eye.x) * forward.x + (center.y - eye.y) * forward.y
         + (center.z - eye.z) * forward.z
         - std::abs(forward.x) * (node.maximum.x - node.minimum.x) / 2
@@ -200,7 +192,6 @@ void TerrainData::Select(const XMMATRIX& vp, const XMFLOAT3& eye, uint32_t scree
 {
     m_stats = {}; m_selected.clear();
     if (m_nodes.empty()) return;
-    // For this perspective matrix wclip equals view-space Z.
     XMFLOAT4X4 matrix;
     XMStoreFloat4x4(&matrix, vp);
     XMFLOAT3 forward;
@@ -214,7 +205,6 @@ bool TerrainData::Validate(std::wstring& error)
     auto fail = [&](const wchar_t* message) { error = message; ResetSelection(); return false; };
     if (m_nodes.size() != 1365 || m_samples.size() != 1024 * 1024)
         return fail(L"Invalid source size or quadtree node count");
-    // Low bits must survive WIC decoding. An RGBA8 conversion would lose these.
     if (std::none_of(m_samples.begin(), m_samples.end(), [](uint16_t v) { return v % 257 != 0; }))
         return fail(L"Height map has only 8-bit precision");
     for (const auto& node : m_nodes) {

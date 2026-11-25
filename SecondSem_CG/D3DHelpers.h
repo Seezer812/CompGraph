@@ -18,4 +18,4 @@ D3D12_RESOURCE_BARRIER Transition(
     D3D12_RESOURCE_STATES before,
     D3D12_RESOURCE_STATES after);
 
-} // namespace D3DHelpers
+}

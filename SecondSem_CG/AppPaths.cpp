@@ -29,4 +29,4 @@ std::wstring PostProcessShaderFile()
 {
     return ExecutableDirectory() + L"PostProcess.hlsl";
 }
-} // namespace AppPaths
+}

@@ -190,7 +190,6 @@ UINT TemporalAA::Resolve(ID3D12GraphicsCommandList* cmd, ID3D12DescriptorHeap* s
     if (!m_settings.enabled)
         return currentColorSrv;
 
-    // History order follows submitted frames, independently of the swap chain.
     const UINT writeIndex = 1 - m_readIndex;
     auto* output = m_history[writeIndex].Get();
     const auto toTarget = D3DHelpers::Transition(output,

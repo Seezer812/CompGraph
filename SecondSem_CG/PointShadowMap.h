@@ -4,7 +4,6 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 
-// Radial-distance shadow cubemap for a point light.
 class PointShadowMap
 {
 public:

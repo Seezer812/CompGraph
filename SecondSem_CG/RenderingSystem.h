@@ -1,7 +1,5 @@
 #pragma once
 
-// RenderingSystem — высокоуровневая подсистема рендеринга для отложенного освещения:
-// оркеструет G-buffer (геопроход) и полноэкранный проход света по нескольким источникам.
 
 #include <cstdint>
 #include <vector>
@@ -21,11 +19,8 @@ class RenderingSystem
 {
 public:
     using PointLight = LightTiling::PointLight;
-    // The first point light owns the existing shadow cubemap and marker.
-    // Other lights have finite radius and no shadow maps. Empty lists are valid.
     void SetPointLights(std::vector<PointLight> lights);
     const std::vector<PointLight>& PointLights() const { return m_pointLights; }
-    // Select only after the corresponding GPU frame has completed.
     void BeginFrame(UINT frameIndex) { m_frameIndex = frameIndex; }
     void Init(
         ID3D12Device* device,

@@ -4,7 +4,6 @@
 #include <DirectXMath.h>
 #include <wrl/client.h>
 
-// A small procedural wall whose cells are submitted as four-control-point patches.
 class WaveWallRenderer
 {
 public:

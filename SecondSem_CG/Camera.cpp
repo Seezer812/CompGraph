@@ -90,4 +90,4 @@ void Update(
     }
 }
 
-} // namespace Camera
+}
